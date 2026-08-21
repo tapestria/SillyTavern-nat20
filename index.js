@@ -176,7 +176,15 @@ const LOOKUP_CATEGORIES = [
     'subclasses', 'backgrounds', 'feats', 'features',
 ];
 
+// Canonical SRD slugs are hyphen-separated (cure-wounds, magic-missile) and
+// the bridge does exact slug matches — used for /nat20-lookup.
 function normalizeSlug(text) {
+    return String(text).trim().toLowerCase().replace(/[\s_]+/g, '-').replace(/[^a-z0-9-]/g, '');
+}
+
+// SKILL_ABILITY keys are snake_case — used for /nat20-check's skill arg and
+// /nat20-save's ability arg, kept distinct from SRD slug normalization above.
+function normalizeSkillKey(text) {
     return String(text).trim().toLowerCase().replace(/[\s-]+/g, '_').replace(/[^a-z0-9_]/g, '');
 }
 
@@ -251,12 +259,12 @@ async function checkCommand(kind, named, arg) {
 
     let label;
     if (kind === 'skill') {
-        const skill = normalizeSlug(arg);
+        const skill = normalizeSkillKey(arg);
         body.skill = skill;
         body.ability = SKILL_ABILITY[skill] ?? 'str';
         label = `${capitalize(skill)} check`;
     } else {
-        body.ability = normalizeSlug(arg);
+        body.ability = normalizeSkillKey(arg);
         label = `${capitalize(arg)} save`;
     }
 
