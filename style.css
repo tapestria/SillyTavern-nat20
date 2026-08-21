@@ -1,0 +1,23 @@
+.nat20-settings .inline-drawer-content {
+    display: flex;
+    flex-direction: column;
+    gap: 4px;
+}
+
+.nat20-settings label {
+    margin-top: 6px;
+    font-weight: bold;
+}
+
+.nat20-status {
+    font-size: 0.9em;
+    min-height: 1.2em;
+}
+
+.nat20-status.nat20-status--ok {
+    color: #4caf50;
+}
+
+.nat20-status.nat20-status--error {
+    color: #f44336;
+}

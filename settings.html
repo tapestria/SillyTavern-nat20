@@ -1,0 +1,26 @@
+<div id="nat20_settings">
+    <div class="nat20-settings inline-drawer">
+        <div class="inline-drawer-toggle inline-drawer-header">
+            <b>Nat20 Rules Engine</b>
+            <div class="inline-drawer-icon fa-solid fa-circle-chevron-down down"></div>
+        </div>
+        <div class="inline-drawer-content">
+            <label for="nat20_bridge_url">Bridge URL</label>
+            <div class="flex-container">
+                <input id="nat20_bridge_url" type="text" class="text_pole flex1" placeholder="http://127.0.0.1:8020" />
+                <input id="nat20_test_connection" class="menu_button" type="submit" value="Test connection" />
+            </div>
+            <span id="nat20_status" class="nat20-status"></span>
+
+            <hr />
+
+            <label for="nat20_homebrew_json">Homebrew JSON</label>
+            <textarea id="nat20_homebrew_json" class="text_pole textarea_compact" rows="6"
+                placeholder="Paste homebrew item/spell/monster JSON here"></textarea>
+            <div class="flex-container">
+                <input id="nat20_homebrew_import" class="menu_button" type="submit" value="Import homebrew" />
+            </div>
+            <span id="nat20_homebrew_status" class="nat20-status"></span>
+        </div>
+    </div>
+</div>

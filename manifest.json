@@ -1,0 +1,12 @@
+{
+    "display_name": "Nat20 Rules Engine",
+    "loading_order": 100,
+    "requires": [],
+    "optional": [],
+    "js": "index.js",
+    "css": "style.css",
+    "author": "tapestria",
+    "version": "0.1.0",
+    "homePage": "https://github.com/tapestria/SillyTavern-nat20",
+    "auto_update": false
+}
