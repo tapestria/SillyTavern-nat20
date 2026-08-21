@@ -146,6 +146,204 @@ function onBridgeUrlInput() {
     saveSettings();
 }
 
+// Maps a skill slug (as typed by the user, in any casing/spacing) to the
+// ability score it's keyed off of per SRD 5.2 — needed because /v1/check
+// always wants `ability`, even for skill checks.
+const SKILL_ABILITY = {
+    acrobatics: 'dex',
+    animal_handling: 'wis',
+    arcana: 'int',
+    athletics: 'str',
+    deception: 'cha',
+    history: 'int',
+    insight: 'wis',
+    intimidation: 'cha',
+    investigation: 'int',
+    medicine: 'wis',
+    nature: 'int',
+    perception: 'wis',
+    performance: 'cha',
+    persuasion: 'cha',
+    religion: 'int',
+    sleight_of_hand: 'dex',
+    stealth: 'dex',
+    survival: 'wis',
+};
+
+// SRD categories tried in order when guessing what a /nat20-lookup query is.
+const LOOKUP_CATEGORIES = [
+    'spells', 'items', 'monsters', 'species', 'classes',
+    'subclasses', 'backgrounds', 'feats', 'features',
+];
+
+function normalizeSlug(text) {
+    return String(text).trim().toLowerCase().replace(/[\s-]+/g, '_').replace(/[^a-z0-9_]/g, '');
+}
+
+function capitalize(text) {
+    const s = String(text).replace(/_/g, ' ');
+    return s.charAt(0).toUpperCase() + s.slice(1);
+}
+
+/**
+ * Finds a roster entry by PC name, case-insensitively, whether the roster
+ * object is keyed by name or by some other id with a `.name` field.
+ * @param {Record<string, object>} roster
+ * @param {string} pcName
+ * @returns {object|null}
+ */
+function findRosterEntry(roster, pcName) {
+    if (roster[pcName]) return roster[pcName];
+    const lower = pcName.toLowerCase();
+    for (const key of Object.keys(roster)) {
+        const entry = roster[key];
+        if (key.toLowerCase() === lower) return entry;
+        if (entry && typeof entry.name === 'string' && entry.name.toLowerCase() === lower) return entry;
+    }
+    return null;
+}
+
+/** Shared error funnel: bridge errors land in chat instead of the console. */
+async function run(fn) {
+    try {
+        return await fn();
+    } catch (e) {
+        await postToChat(`⚠️ nat20: ${e.message}`);
+        return null;
+    }
+}
+
+/**
+ * Builds and submits a /v1/check request (skill check or saving throw) for
+ * a named roster PC, then narrates the result.
+ * @param {'skill'|'saving_throw'} kind
+ * @param {Record<string, string|number|undefined>} named `/nat20-check`/`/nat20-save` named args (pc, dc).
+ * @param {string} arg The skill (for `skill`) or ability (for `saving_throw`).
+ */
+async function checkCommand(kind, named, arg) {
+    const pcName = named?.pc;
+    if (!pcName) {
+        await postToChat('⚠️ nat20: specify pc=<name>, e.g. /nat20-check stealth pc=Elara dc=15');
+        return '';
+    }
+
+    const roster = getSettings().roster ?? {};
+    const entry = findRosterEntry(roster, String(pcName));
+    if (!entry) {
+        await postToChat(`⚠️ nat20: no roster PC named "${pcName}" — add one with /nat20-pc`);
+        return '';
+    }
+
+    const build = entry.build ?? {};
+    const abilityScores = build.ability_scores ?? {};
+    const level = Number(build.level) || 1;
+    const proficiencyBonus = 2 + Math.floor((level - 1) / 4);
+    const proficientSkills = entry.proficient_skills ?? [];
+    const proficientSaves = entry.proficient_saves ?? [];
+
+    const body = {
+        kind,
+        ability_scores: abilityScores,
+        proficiency_bonus: proficiencyBonus,
+        proficient_skills: proficientSkills,
+        proficient_saves: proficientSaves,
+    };
+
+    let label;
+    if (kind === 'skill') {
+        const skill = normalizeSlug(arg);
+        body.skill = skill;
+        body.ability = SKILL_ABILITY[skill] ?? 'str';
+        label = `${capitalize(skill)} check`;
+    } else {
+        body.ability = normalizeSlug(arg);
+        label = `${capitalize(arg)} save`;
+    }
+
+    if (named.dc !== undefined && named.dc !== null && named.dc !== '') {
+        body.dc = Number(named.dc);
+    }
+
+    const result = await run(() => bridgeFetch('/v1/check', { method: 'POST', body }));
+    if (!result) return '';
+
+    let msg = `📋 ${entry.name} ${label}`;
+    if (body.dc !== undefined) msg += ` vs DC ${body.dc}`;
+    msg += `: **${result.roll_total}**`;
+    if (result.success === true) msg += ' — success';
+    else if (result.success === false) msg += ' — failure';
+    await postToChat(msg);
+    return String(result.roll_total);
+}
+
+/**
+ * Looks up an SRD entry by name, guessing its category (spells, items,
+ * monsters, ...) by trying each in turn, and posts a trimmed summary.
+ * @param {string} query
+ */
+async function lookupCommand(query) {
+    const slug = normalizeSlug(query);
+    if (!slug) {
+        await postToChat('⚠️ nat20: /nat20-lookup needs a name, e.g. /nat20-lookup fireball');
+        return '';
+    }
+
+    for (const category of LOOKUP_CATEGORIES) {
+        let entry;
+        try {
+            entry = await bridgeFetch(`/v1/srd/${category}/${slug}`);
+        } catch {
+            continue; // not in this category (404) or bridge hiccup — keep guessing
+        }
+        const description = typeof entry.description === 'string' ? entry.description : '';
+        const summary = description.length > 300 ? `${description.slice(0, 300)}…` : description;
+        await postToChat(`📖 **${entry.name}** (${category})${summary ? `\n${summary}` : ''}`);
+        return entry.name;
+    }
+
+    await postToChat(`⚠️ nat20: no SRD entry found for "${query}"`);
+    return '';
+}
+
+function registerCommands() {
+    const { SlashCommandParser, SlashCommand, SlashCommandNamedArgument,
+        ARGUMENT_TYPE } = getCtx();
+
+    const cmd = (name, helpString, namedArgs, callback) =>
+        SlashCommandParser.addCommandObject(SlashCommand.fromProps({
+            name, helpString, namedArgumentList: namedArgs, callback,
+        }));
+
+    cmd('nat20-roll', 'Roll dice, e.g. /nat20-roll 2d6+3', [],
+        async (_named, dice) => {
+            const r = await run(() => bridgeFetch('/v1/roll',
+                { method: 'POST', body: { dice: String(dice) } }));
+            if (r) await postToChat(`🎲 ${dice} → **${r.total}**`);
+            return r ? String(r.total) : '';
+        });
+
+    cmd('nat20-check',
+        'Skill check for a roster PC: /nat20-check stealth pc=Elara dc=15',
+        [
+            SlashCommandNamedArgument.fromProps({ name: 'pc', typeList: ARGUMENT_TYPE.STRING }),
+            SlashCommandNamedArgument.fromProps({ name: 'dc', typeList: ARGUMENT_TYPE.NUMBER }),
+        ],
+        async (named, skill) => checkCommand('skill', named, String(skill)));
+
+    cmd('nat20-save',
+        'Saving throw for a roster PC: /nat20-save dex pc=Elara dc=15',
+        [
+            SlashCommandNamedArgument.fromProps({ name: 'pc', typeList: ARGUMENT_TYPE.STRING }),
+            SlashCommandNamedArgument.fromProps({ name: 'dc', typeList: ARGUMENT_TYPE.NUMBER }),
+        ],
+        async (named, ability) => checkCommand('saving_throw', named, String(ability)));
+
+    cmd('nat20-lookup',
+        'Look up an SRD entry by name, e.g. /nat20-lookup fireball',
+        [],
+        async (_named, query) => lookupCommand(String(query)));
+}
+
 jQuery(async () => {
     const settingsHtml = await getCtx().renderExtensionTemplateAsync(`third-party/${EXTENSION_ID}`, 'settings');
     $('#extensions_settings2').append(settingsHtml);
@@ -156,6 +354,8 @@ jQuery(async () => {
     $('#nat20_bridge_url').on('input', onBridgeUrlInput);
     $('#nat20_test_connection').on('click', onTestConnectionClick);
     $('#nat20_homebrew_import').on('click', onHomebrewImportClick);
+
+    registerCommands();
 });
 
 export { bridgeFetch, getSettings, postToChat };
