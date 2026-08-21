@@ -404,11 +404,13 @@ async function getHitDieSize(classSlug) {
 }
 
 /**
- * Projects a roster entry down to the exact shape /v1/combat accepts for a
+ * Projects a roster entry down to the exact shape /v1/combat expects for a
  * party member — the roster entry itself carries extra bookkeeping fields
- * (hp_max, dice_remaining, summary) the bridge's combat-start model does not
- * declare and will reject as unknown fields, so this must be an explicit
- * allow-list, never a spread.
+ * (hp_max, dice_remaining, summary) that PartyValidateRequest doesn't
+ * declare. The bridge doesn't forbid extra fields (no `extra="forbid"`), so
+ * sending them wouldn't error, but shipping only the fields the combat-start
+ * payload actually documents is deliberate hygiene — an explicit allow-list,
+ * never a spread.
  * @param {object} entry
  */
 function projectPartyMember(entry) {
@@ -463,6 +465,14 @@ function resolveTarget(order, targetText) {
     };
 }
 
+// GET /v1/combat/{id} returns `current_actor` as the composite
+// "<entity_id> (<Name>)" string (routes_combat.py), not a bare entity_id —
+// this pulls the id back out so actor-defaulting and the status marker can
+// compare it against roster/order entity_ids.
+function currentActorId(view) {
+    return String(view?.current_actor ?? '').split(' ')[0];
+}
+
 // Splits a turn-command's raw unnamed-arg text into a leading slug token
 // (spell/item/feature id) and whatever's left as the target reference — used
 // by /nat20-cast, /nat20-use-item, and /nat20-feature, whose target (unlike
@@ -505,12 +515,13 @@ async function submitIntent(intentType, idField, slugValue, named, targetText) {
         }
         actorId = entry.entity_id;
     } else {
-        const isRosterPc = Object.values(roster).some((e) => e.entity_id === view.current_actor);
+        const currentId = currentActorId(view);
+        const isRosterPc = Object.values(roster).some((e) => e.entity_id === currentId);
         if (!isRosterPc) {
             await postToChat("⚠️ nat20: not a PC's turn — specify pc=<name>");
             return '';
         }
-        actorId = view.current_actor;
+        actorId = currentId;
     }
 
     const body = { actor_id: actorId, intent_type: intentType };
@@ -941,7 +952,7 @@ function registerCommands() {
             if (!view) return '';
 
             const rows = (view.order ?? []).map((o) => {
-                const marker = o.entity_id === view.current_actor ? '➤' : '';
+                const marker = o.entity_id === currentActorId(view) ? '➤' : '';
                 const conditions = [o.dead ? 'dead' : null, ...(o.conditions ?? [])].filter(Boolean).join(', ');
                 return `| ${marker} | ${o.name} | ${o.hp}/${o.max_hp} | ${conditions} |`;
             });
