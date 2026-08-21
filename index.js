@@ -981,9 +981,16 @@ function registerCommands() {
 
             const outcome = result.outcome ?? {};
             let msg = `🏁 Combat ended — ${outcome.ended_reason ?? 'unknown'}`;
-            if (outcome.xp !== undefined) msg += ` — XP: ${outcome.xp}`;
-            if (outcome.loot) {
-                msg += ` — Loot: ${Array.isArray(outcome.loot) ? outcome.loot.join(', ') : outcome.loot}`;
+            const xpAwarded = outcome.xp_awarded ?? {};
+            const totalXp = Object.values(xpAwarded).reduce((sum, xp) => sum + xp, 0);
+            if (totalXp > 0) msg += ` — XP: ${totalXp}`;
+            const lootDrops = outcome.loot_drops ?? [];
+            if (lootDrops.length > 0) {
+                const items = lootDrops.map((drop) => {
+                    const label = drop.name ?? drop.item_id;
+                    return drop.quantity && drop.quantity !== 1 ? `${label} x${drop.quantity}` : label;
+                });
+                msg += ` — Loot: ${items.join(', ')}`;
             }
             if (result.narration) msg += `\n${result.narration}`;
             await postToChat(msg);

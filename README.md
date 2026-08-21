@@ -26,6 +26,11 @@ an external sidecar it calls over HTTP.
    uv tool run nat20-bridge
    ```
 
+   `nat20-bridge` isn't published on PyPI yet — until then, `uvx nat20-bridge`
+   and `uv tool run nat20-bridge` won't resolve. Instead, clone
+   [nat20](https://github.com/tapestria/nat20) and run `uv run nat20-bridge`
+   from a checkout.
+
    Useful flags:
 
    | Flag | Default | Purpose |
@@ -132,6 +137,21 @@ loose shape — exact wording/rolls will vary.
 9. `/nat20-end`
    - Expect: `🏁 Combat ended — <victory/defeat_tpk/flee/forced>` with XP/loot
      if the bridge returned any.
+
+## Known limitations
+
+These are gaps in the current bridge/engine, not the extension — tracked
+upstream in [nat20](https://github.com/tapestria/nat20)'s backlog:
+
+- **Skill/save proficiency for roster PCs isn't applied yet.** Ability
+  checks and saving throws resolve as if the character were non-proficient,
+  even for skills/saves their class or background grants proficiency in.
+- **Spells can't be upcast.** There's no `slot_level` parameter on
+  `/nat20-cast`, so every cast resolves at the spell's base level regardless
+  of which slot you'd spend.
+- **Multi-option features aren't selectable.** Features with a choice at
+  use-time (e.g. Channel Divinity's multiple options) can't be picked between
+  — only a single default resolution is available.
 
 ## License
 
