@@ -237,7 +237,7 @@ async function run(fn) {
 async function checkCommand(kind, named, arg) {
     const pcName = named?.pc;
     if (!pcName) {
-        await postToChat('⚠️ nat20: specify pc=<name>, e.g. /nat20-check stealth pc=Elara dc=15');
+        await postToChat('⚠️ nat20: specify pc=<name>, e.g. /nat20-check pc=Elara dc=15 stealth');
         return '';
     }
 
@@ -560,7 +560,7 @@ function registerCommands() {
         });
 
     cmd('nat20-check',
-        'Skill check for a roster PC: /nat20-check stealth pc=Elara dc=15',
+        'Skill check for a roster PC: /nat20-check pc=Elara dc=15 stealth',
         [
             SlashCommandNamedArgument.fromProps({ name: 'pc', typeList: ARGUMENT_TYPE.STRING }),
             SlashCommandNamedArgument.fromProps({ name: 'dc', typeList: ARGUMENT_TYPE.NUMBER }),
@@ -568,7 +568,7 @@ function registerCommands() {
         async (named, skill) => checkCommand('skill', named, String(skill)));
 
     cmd('nat20-save',
-        'Saving throw for a roster PC: /nat20-save dex pc=Elara dc=15',
+        'Saving throw for a roster PC: /nat20-save pc=Elara dc=15 dex',
         [
             SlashCommandNamedArgument.fromProps({ name: 'pc', typeList: ARGUMENT_TYPE.STRING }),
             SlashCommandNamedArgument.fromProps({ name: 'dc', typeList: ARGUMENT_TYPE.NUMBER }),
@@ -764,7 +764,7 @@ function registerCommands() {
         });
 
     cmd('nat20-rest',
-        'Short/long rest for a roster PC: /nat20-rest short pc=Elara dice=2  |  /nat20-rest long pc=Elara',
+        'Short/long rest for a roster PC: /nat20-rest pc=Elara dice=2 short  |  /nat20-rest pc=Elara long',
         [
             SlashCommandNamedArgument.fromProps({ name: 'pc', typeList: ARGUMENT_TYPE.STRING }),
             SlashCommandNamedArgument.fromProps({ name: 'dice', typeList: ARGUMENT_TYPE.NUMBER }),
@@ -772,13 +772,13 @@ function registerCommands() {
         async (named, kind) => {
             const restKind = String(kind).trim().toLowerCase();
             if (restKind !== 'short' && restKind !== 'long') {
-                await postToChat('⚠️ nat20: /nat20-rest needs "short" or "long", e.g. /nat20-rest short pc=Elara dice=2');
+                await postToChat('⚠️ nat20: /nat20-rest needs "short" or "long", e.g. /nat20-rest pc=Elara dice=2 short');
                 return '';
             }
 
             const pcName = named?.pc;
             if (!pcName) {
-                await postToChat('⚠️ nat20: specify pc=<name>, e.g. /nat20-rest short pc=Elara dice=2');
+                await postToChat('⚠️ nat20: specify pc=<name>, e.g. /nat20-rest pc=Elara dice=2 short');
                 return '';
             }
 
@@ -793,7 +793,7 @@ function registerCommands() {
             if (restKind === 'short') {
                 diceToSpend = Number(named.dice);
                 if (!diceToSpend) {
-                    await postToChat('⚠️ nat20: /nat20-rest short needs dice=<n>, e.g. /nat20-rest short pc=Elara dice=2');
+                    await postToChat('⚠️ nat20: /nat20-rest short needs dice=<n>, e.g. /nat20-rest pc=Elara dice=2 short');
                     return '';
                 }
             }
@@ -877,7 +877,7 @@ function registerCommands() {
         });
 
     cmd('nat20-attack',
-        'Attack in combat: /nat20-attack <target> weapon=<slug> pc=<name>',
+        'Attack in combat: /nat20-attack weapon=<slug> pc=<name> <target>',
         [
             SlashCommandNamedArgument.fromProps({ name: 'weapon', typeList: ARGUMENT_TYPE.STRING }),
             SlashCommandNamedArgument.fromProps({ name: 'pc', typeList: ARGUMENT_TYPE.STRING }),
@@ -885,28 +885,28 @@ function registerCommands() {
         async (named, args) => {
             const target = String(args ?? '').trim();
             if (!target) {
-                await postToChat('⚠️ nat20: /nat20-attack needs a target, e.g. /nat20-attack goblin weapon=longsword');
+                await postToChat('⚠️ nat20: /nat20-attack needs a target, e.g. /nat20-attack weapon=longsword goblin');
                 return '';
             }
             return submitIntent('attack', 'weapon_id', named?.weapon, named, target);
         });
 
     cmd('nat20-cast',
-        'Cast a spell in combat: /nat20-cast <spell-slug> <target> pc=<name>',
+        'Cast a spell in combat: /nat20-cast pc=<name> <spell-slug> <target>',
         [
             SlashCommandNamedArgument.fromProps({ name: 'pc', typeList: ARGUMENT_TYPE.STRING }),
         ],
         async (named, args) => {
             const { slug, target } = parseSlugAndTarget(args);
             if (!slug) {
-                await postToChat('⚠️ nat20: /nat20-cast needs a spell slug, e.g. /nat20-cast fire-bolt goblin');
+                await postToChat('⚠️ nat20: /nat20-cast needs a spell slug, e.g. /nat20-cast pc=Elara fire-bolt goblin');
                 return '';
             }
             return submitIntent('cast_spell', 'spell_id', slug, named, target);
         });
 
     cmd('nat20-use-item',
-        'Use an item in combat: /nat20-use-item <item-slug> <target> pc=<name>',
+        'Use an item in combat: /nat20-use-item pc=<name> <item-slug> <target>',
         [
             SlashCommandNamedArgument.fromProps({ name: 'pc', typeList: ARGUMENT_TYPE.STRING }),
         ],
@@ -920,7 +920,7 @@ function registerCommands() {
         });
 
     cmd('nat20-feature',
-        'Use a class feature in combat: /nat20-feature <feature-slug> <target> pc=<name>',
+        'Use a class feature in combat: /nat20-feature pc=<name> <feature-slug> <target>',
         [
             SlashCommandNamedArgument.fromProps({ name: 'pc', typeList: ARGUMENT_TYPE.STRING }),
         ],

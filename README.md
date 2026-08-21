@@ -42,23 +42,28 @@ an external sidecar it calls over HTTP.
 
 ## Command reference
 
+SillyTavern's STscript grammar requires all `name=value` arguments to appear
+before any positional/unnamed arguments on the line, so — despite how the
+help text for e.g. `/nat20-attack` reads elsewhere — always put `weapon=`,
+`pc=`, `dc=`, etc. first and the plain-text argument(s) last.
+
 | Command | Description |
 | --- | --- |
 | `/nat20-roll <dice>` | Roll dice via the bridge, e.g. `/nat20-roll 2d6+3`. |
-| `/nat20-check <skill> pc=<name> [dc=<n>]` | Skill check for a roster PC, e.g. `/nat20-check stealth pc=Elara dc=15`. |
-| `/nat20-save <ability> pc=<name> [dc=<n>]` | Saving throw for a roster PC, e.g. `/nat20-save dex pc=Elara dc=15`. |
+| `/nat20-check pc=<name> [dc=<n>] <skill>` | Skill check for a roster PC, e.g. `/nat20-check pc=Elara dc=15 stealth`. |
+| `/nat20-save pc=<name> [dc=<n>] <ability>` | Saving throw for a roster PC, e.g. `/nat20-save pc=Elara dc=15 dex`. |
 | `/nat20-lookup <name>` | Look up an SRD entry by name across spells/items/monsters/etc, e.g. `/nat20-lookup fireball`. |
 | `/nat20-pc name=<n> class=<slug> species=<slug> [subclass=<slug>] level=<n> str= dex= con= int= wis= cha= [spells=<a,b>] [equipment=<a,b>]` | Create or update (case-insensitive, in place) a roster PC. |
 | `/nat20-pc-import <json>` | Import a roster PC from raw `/v1/party/validate`-shaped JSON. |
 | `/nat20-party` | List roster PCs with class/level/HP/summary. |
 | `/nat20-pc-remove <name>` | Remove a PC from the roster. |
 | `/nat20-equip <name> <item-slug>` | Add an item to a PC's equipment and re-validate, e.g. `/nat20-equip Elara hb-frost-brand`. |
-| `/nat20-rest short pc=<name> dice=<n>` / `/nat20-rest long pc=<name>` | Short or long rest for a roster PC. |
+| `/nat20-rest pc=<name> dice=<n> short` / `/nat20-rest pc=<name> long` | Short or long rest for a roster PC. |
 | `/nat20-fight <monster-slug>... [party=<name,name,...>]` | Start a combat against the given monster slugs (each instantiated separately, so repeat a slug for multiple copies). `party=` defaults to the whole roster; errors if the roster is empty. Stores the returned `combat_id` for subsequent turn commands. |
-| `/nat20-attack <target> weapon=<slug> [pc=<name>]` | Submit an attack intent. `pc=` picks the acting PC explicitly; otherwise defaults to the current actor if it's a roster PC. `<target>` matches an `entity_id` exactly or a combatant name by case-insensitive prefix (errors on no match or ambiguous matches). |
-| `/nat20-cast <spell-slug> [<target>] [pc=<name>]` | Submit a cast-spell intent; target is optional for self-targeted spells. |
-| `/nat20-use-item <item-slug> [<target>] [pc=<name>]` | Submit a use-item intent. |
-| `/nat20-feature <feature-slug> [<target>] [pc=<name>]` | Submit a use-feature intent (class features). |
+| `/nat20-attack weapon=<slug> [pc=<name>] <target>` | Submit an attack intent. `pc=` picks the acting PC explicitly; otherwise defaults to the current actor if it's a roster PC. `<target>` matches an `entity_id` exactly or a combatant name by case-insensitive prefix (errors on no match or ambiguous matches). |
+| `/nat20-cast [pc=<name>] <spell-slug> [<target>]` | Submit a cast-spell intent; target is optional for self-targeted spells. |
+| `/nat20-use-item [pc=<name>] <item-slug> [<target>]` | Submit a use-item intent. |
+| `/nat20-feature [pc=<name>] <feature-slug> [<target>]` | Submit a use-feature intent (class features). |
 | `/nat20-next` | Advance the current monster's turn. |
 | `/nat20-status` | Render a markdown table of the current round's turn order, HP, and conditions, with `➤` marking the current actor. |
 | `/nat20-end` | End the active combat, post the outcome (`ended_reason`, XP, loot if present), and clear the stored combat id. |
@@ -118,7 +123,7 @@ loose shape — exact wording/rolls will vary.
 7. `/nat20-status`
    - Expect: a markdown table (`| | Name | HP | Conditions |`) with `➤`
      marking whoever's turn it is.
-8. If it's Elara's turn: `/nat20-attack goblin weapon=quarterstaff` (or
+8. If it's Elara's turn: `/nat20-attack weapon=quarterstaff goblin` (or
    `/nat20-cast fire-bolt goblin`). If it's the goblin's turn: `/nat20-next`.
    - Expect: narration of the attack/spell/monster-turn's outcome; repeat
      this step (checking `/nat20-status` as needed) until the bridge reports
