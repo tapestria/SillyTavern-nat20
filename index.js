@@ -313,6 +313,68 @@ async function lookupCommand(query) {
     return '';
 }
 
+// Splits a comma-separated named-arg value ("fire-bolt, magic-missile") into
+// a trimmed, empty-filtered list — used for /nat20-pc's spells=/equipment=.
+function parseCommaList(text) {
+    if (text === undefined || text === null || text === '') return [];
+    return String(text).split(',').map((s) => s.trim()).filter(Boolean);
+}
+
+// Builds the {str,dex,con,int,wis,cha} ability_scores object /v1/party/validate
+// expects from /nat20-pc's named args, defaulting any missing score to 10.
+function abilityScoresFromNamed(named) {
+    const pick = (key) => {
+        const value = named?.[key];
+        return value === undefined || value === null || value === '' ? 10 : Number(value);
+    };
+    return {
+        str: pick('str'), dex: pick('dex'), con: pick('con'),
+        int: pick('int'), wis: pick('wis'), cha: pick('cha'),
+    };
+}
+
+/**
+ * Shared /v1/party/validate → roster-store path used by /nat20-pc and
+ * /nat20-pc-import. On success, stores the validate request body plus the
+ * bits the bridge computed (entity_id, hp_max, current summary) under
+ * `roster[requestBody.name]`, persists, and narrates the one-line summary.
+ * @param {object} requestBody `{name, build, spells_known?, hp_current?}`.
+ * @returns {Promise<object|null>} The stored roster entry, or `null` on error
+ *   (the `run()` funnel has already posted the bridge's error to chat).
+ */
+async function validateAndStore(requestBody) {
+    const result = await run(() => bridgeFetch('/v1/party/validate', { method: 'POST', body: requestBody }));
+    if (!result) return null;
+
+    const settings = getSettings();
+    const level = Number(requestBody.build?.level) || 1;
+    const entry = {
+        ...requestBody,
+        entity_id: result.member.entity_id,
+        hp_max: result.member.hp_max,
+        hp_current: result.member.hp_current ?? result.member.hp_max,
+        dice_remaining: level,
+        summary: result.summary,
+    };
+    settings.roster[requestBody.name] = entry;
+    saveSettings();
+    await postToChat(`✅ ${result.summary}`);
+    return entry;
+}
+
+// GET /v1/srd/classes/{slug} → hit_die ("d10") → 10, memoized per class slug
+// for the lifetime of the page (rest commands need it every call).
+const hitDieCache = new Map();
+
+async function getHitDieSize(classSlug) {
+    if (hitDieCache.has(classSlug)) return hitDieCache.get(classSlug);
+    const entry = await bridgeFetch(`/v1/srd/classes/${classSlug}`);
+    const match = /^d(\d+)$/.exec(String(entry.hit_die ?? '').trim());
+    const size = match ? Number(match[1]) : 8;
+    hitDieCache.set(classSlug, size);
+    return size;
+}
+
 function registerCommands() {
     const { SlashCommandParser, SlashCommand, SlashCommandNamedArgument,
         ARGUMENT_TYPE } = getCtx();
@@ -350,6 +412,218 @@ function registerCommands() {
         'Look up an SRD entry by name, e.g. /nat20-lookup fireball',
         [],
         async (_named, query) => lookupCommand(String(query)));
+
+    cmd('nat20-pc',
+        'Create/update a roster PC: /nat20-pc name=Elara class=wizard species=elf-high level=3 ' +
+        'str=8 dex=14 con=13 int=15 wis=12 cha=10 spells=fire-bolt,magic-missile equipment=quarterstaff',
+        [
+            SlashCommandNamedArgument.fromProps({ name: 'name', typeList: ARGUMENT_TYPE.STRING }),
+            SlashCommandNamedArgument.fromProps({ name: 'class', typeList: ARGUMENT_TYPE.STRING }),
+            SlashCommandNamedArgument.fromProps({ name: 'species', typeList: ARGUMENT_TYPE.STRING }),
+            SlashCommandNamedArgument.fromProps({ name: 'subclass', typeList: ARGUMENT_TYPE.STRING }),
+            SlashCommandNamedArgument.fromProps({ name: 'level', typeList: ARGUMENT_TYPE.NUMBER }),
+            SlashCommandNamedArgument.fromProps({ name: 'str', typeList: ARGUMENT_TYPE.NUMBER }),
+            SlashCommandNamedArgument.fromProps({ name: 'dex', typeList: ARGUMENT_TYPE.NUMBER }),
+            SlashCommandNamedArgument.fromProps({ name: 'con', typeList: ARGUMENT_TYPE.NUMBER }),
+            SlashCommandNamedArgument.fromProps({ name: 'int', typeList: ARGUMENT_TYPE.NUMBER }),
+            SlashCommandNamedArgument.fromProps({ name: 'wis', typeList: ARGUMENT_TYPE.NUMBER }),
+            SlashCommandNamedArgument.fromProps({ name: 'cha', typeList: ARGUMENT_TYPE.NUMBER }),
+            SlashCommandNamedArgument.fromProps({ name: 'spells', typeList: ARGUMENT_TYPE.STRING }),
+            SlashCommandNamedArgument.fromProps({ name: 'equipment', typeList: ARGUMENT_TYPE.STRING }),
+        ],
+        async (named) => {
+            if (!named?.name || !named.class || !named.species || !named.level) {
+                await postToChat('⚠️ nat20: /nat20-pc needs name=, class=, species=, and level=, e.g. ' +
+                    '/nat20-pc name=Elara class=wizard species=elf-high level=3 str=8 dex=14 con=13 int=15 wis=12 cha=10');
+                return '';
+            }
+
+            const requestBody = {
+                name: String(named.name),
+                build: {
+                    species_slug: normalizeSlug(named.species),
+                    class_slug: normalizeSlug(named.class),
+                    level: Number(named.level),
+                    ability_scores: abilityScoresFromNamed(named),
+                    equipment: parseCommaList(named.equipment).map(normalizeSlug),
+                },
+            };
+            if (named.subclass) requestBody.build.subclass_slug = normalizeSlug(named.subclass);
+            const spells = parseCommaList(named.spells).map(normalizeSlug);
+            if (spells.length) requestBody.spells_known = spells;
+
+            const entry = await validateAndStore(requestBody);
+            return entry?.entity_id ?? '';
+        });
+
+    cmd('nat20-pc-import',
+        'Import a roster PC from raw JSON, e.g. /nat20-pc-import {"name":"Elara","build":{"species_slug":"elf-high",' +
+        '"class_slug":"wizard","level":3,"ability_scores":{"str":8,"dex":14,"con":13,"int":15,"wis":12,"cha":10}}}',
+        [],
+        async (_named, raw) => {
+            let requestBody;
+            try {
+                requestBody = JSON.parse(String(raw));
+            } catch {
+                await postToChat('⚠️ nat20: /nat20-pc-import needs valid JSON, e.g. /nat20-pc-import ' +
+                    '{"name":"Elara","build":{"species_slug":"elf-high","class_slug":"wizard","level":3,' +
+                    '"ability_scores":{"str":8,"dex":14,"con":13,"int":15,"wis":12,"cha":10}}}');
+                return '';
+            }
+            if (!requestBody?.name) {
+                await postToChat('⚠️ nat20: imported JSON needs a "name" field');
+                return '';
+            }
+
+            const entry = await validateAndStore(requestBody);
+            return entry?.entity_id ?? '';
+        });
+
+    cmd('nat20-party', 'List roster PCs', [],
+        async () => {
+            const roster = getSettings().roster ?? {};
+            const names = Object.keys(roster);
+            if (!names.length) {
+                await postToChat('nat20: roster is empty — add a PC with /nat20-pc');
+                return '';
+            }
+
+            const lines = names.map((key) => {
+                const entry = roster[key];
+                const classLevel = entry.build ? `${entry.build.class_slug} ${entry.build.level}` : '';
+                const hp = `HP ${entry.hp_current}/${entry.hp_max}`;
+                return `- **${entry.name}** (${classLevel}) — ${hp}${entry.summary ? ` — ${entry.summary}` : ''}`;
+            });
+            await postToChat(`🎭 **Party**\n${lines.join('\n')}`);
+            return String(names.length);
+        });
+
+    cmd('nat20-pc-remove', 'Remove a PC from the roster: /nat20-pc-remove Elara', [],
+        async (_named, pcName) => {
+            const roster = getSettings().roster ?? {};
+            const entry = findRosterEntry(roster, String(pcName));
+            if (!entry) {
+                await postToChat(`⚠️ nat20: no roster PC named "${pcName}"`);
+                return '';
+            }
+
+            const key = Object.keys(roster).find((k) => roster[k] === entry);
+            delete roster[key];
+            saveSettings();
+            await postToChat(`🗑️ removed ${entry.name} from the roster`);
+            return entry.name;
+        });
+
+    cmd('nat20-equip',
+        'Add equipment to a roster PC and re-validate: /nat20-equip Elara hb-frost-brand',
+        [],
+        async (_named, args) => {
+            const [pcName, slug] = String(args).trim().split(/\s+/).filter(Boolean);
+            if (!pcName || !slug) {
+                await postToChat('⚠️ nat20: /nat20-equip needs a PC name and an item slug, ' +
+                    'e.g. /nat20-equip Elara hb-frost-brand');
+                return '';
+            }
+
+            const roster = getSettings().roster ?? {};
+            const entry = findRosterEntry(roster, pcName);
+            if (!entry) {
+                await postToChat(`⚠️ nat20: no roster PC named "${pcName}" — add one with /nat20-pc`);
+                return '';
+            }
+
+            entry.build = entry.build ?? {};
+            entry.build.equipment = Array.isArray(entry.build.equipment) ? entry.build.equipment : [];
+            entry.build.equipment.push(normalizeSlug(slug));
+
+            const requestBody = {
+                name: entry.name,
+                entity_id: entry.entity_id,
+                build: entry.build,
+                spells_known: entry.spells_known,
+                hp_current: entry.hp_current,
+            };
+
+            const result = await run(() => bridgeFetch('/v1/party/validate', { method: 'POST', body: requestBody }));
+            if (!result) {
+                entry.build.equipment.pop(); // validate rejected it — roll back the append
+                return '';
+            }
+
+            entry.entity_id = result.member.entity_id;
+            entry.hp_max = result.member.hp_max;
+            entry.hp_current = result.member.hp_current ?? result.member.hp_max;
+            entry.summary = result.summary;
+            saveSettings();
+            await postToChat(`✅ ${result.summary}`);
+            return entry.entity_id ?? '';
+        });
+
+    cmd('nat20-rest',
+        'Short/long rest for a roster PC: /nat20-rest short pc=Elara dice=2  |  /nat20-rest long pc=Elara',
+        [
+            SlashCommandNamedArgument.fromProps({ name: 'pc', typeList: ARGUMENT_TYPE.STRING }),
+            SlashCommandNamedArgument.fromProps({ name: 'dice', typeList: ARGUMENT_TYPE.NUMBER }),
+        ],
+        async (named, kind) => {
+            const restKind = String(kind).trim().toLowerCase();
+            if (restKind !== 'short' && restKind !== 'long') {
+                await postToChat('⚠️ nat20: /nat20-rest needs "short" or "long", e.g. /nat20-rest short pc=Elara dice=2');
+                return '';
+            }
+
+            const pcName = named?.pc;
+            if (!pcName) {
+                await postToChat('⚠️ nat20: specify pc=<name>, e.g. /nat20-rest short pc=Elara dice=2');
+                return '';
+            }
+
+            const roster = getSettings().roster ?? {};
+            const entry = findRosterEntry(roster, String(pcName));
+            if (!entry) {
+                await postToChat(`⚠️ nat20: no roster PC named "${pcName}" — add one with /nat20-pc`);
+                return '';
+            }
+
+            let diceToSpend;
+            if (restKind === 'short') {
+                diceToSpend = Number(named.dice);
+                if (!diceToSpend) {
+                    await postToChat('⚠️ nat20: /nat20-rest short needs dice=<n>, e.g. /nat20-rest short pc=Elara dice=2');
+                    return '';
+                }
+            }
+
+            const build = entry.build ?? {};
+            const level = Number(build.level) || 1;
+            const diceRemaining = entry.dice_remaining ?? level;
+            const conModifier = Math.floor((Number(build.ability_scores?.con ?? 10) - 10) / 2);
+
+            const result = await run(async () => {
+                const hitDieSize = await getHitDieSize(String(build.class_slug ?? ''));
+                const body = {
+                    hit_die_size: hitDieSize,
+                    dice_remaining: diceRemaining,
+                    dice_total: level,
+                    hp_current: entry.hp_current,
+                    hp_max: entry.hp_max,
+                };
+                if (restKind === 'short') {
+                    body.dice_to_spend = diceToSpend;
+                    body.con_modifier = conModifier;
+                    return bridgeFetch('/v1/rest/short', { method: 'POST', body });
+                }
+                return bridgeFetch('/v1/rest/long', { method: 'POST', body });
+            });
+            if (!result) return '';
+
+            entry.hp_current = result.hp_current;
+            entry.dice_remaining = result.dice_remaining;
+            saveSettings();
+            await postToChat(`💤 ${entry.name} takes a ${restKind} rest — heals ${result.healed}, ` +
+                `HP ${entry.hp_current}/${entry.hp_max}, hit dice remaining ${entry.dice_remaining}`);
+            return String(entry.hp_current);
+        });
 }
 
 jQuery(async () => {
