@@ -321,11 +321,18 @@ function parseCommaList(text) {
 }
 
 // Builds the {str,dex,con,int,wis,cha} ability_scores object /v1/party/validate
-// expects from /nat20-pc's named args, defaulting any missing score to 10.
-function abilityScoresFromNamed(named) {
+// expects from /nat20-pc's named args. A named arg that's actually present
+// overrides; anything omitted falls back to `existing` (an in-progress
+// update's current scores) and finally to the SRD default of 10 — this is
+// what lets `/nat20-pc name=elara level=4` update just the level without
+// resetting every other ability score to 10.
+function abilityScoresFromNamed(named, existing = {}) {
     const pick = (key) => {
         const value = named?.[key];
-        return value === undefined || value === null || value === '' ? 10 : Number(value);
+        if (value === undefined || value === null || value === '') {
+            return existing[key] !== undefined ? existing[key] : 10;
+        }
+        return Number(value);
     };
     return {
         str: pick('str'), dex: pick('dex'), con: pick('con'),
@@ -336,27 +343,42 @@ function abilityScoresFromNamed(named) {
 /**
  * Shared /v1/party/validate → roster-store path used by /nat20-pc and
  * /nat20-pc-import. On success, stores the validate request body plus the
- * bits the bridge computed (entity_id, hp_max, current summary) under
- * `roster[requestBody.name]`, persists, and narrates the one-line summary.
- * @param {object} requestBody `{name, build, spells_known?, hp_current?}`.
+ * bits the bridge computed (entity_id, hp_max, current summary), persists,
+ * and narrates the one-line summary.
+ * @param {object} requestBody `{name, build, spells_known?, hp_current?, entity_id?}`.
+ * @param {object} [opts]
+ * @param {string} [opts.storeKey] Existing roster key to overwrite in place
+ *   (case-insensitive re-run of `/nat20-pc` on an already-known PC), instead
+ *   of defaulting to `requestBody.name` — avoids creating a second,
+ *   differently-cased roster slot for the same character.
+ * @param {object} [opts.existingEntry] The roster entry being updated, if
+ *   any — its `hp_current`/`dice_remaining` are preserved (hp_current capped
+ *   to the possibly-new hp_max) rather than reset by a partial update.
  * @returns {Promise<object|null>} The stored roster entry, or `null` on error
  *   (the `run()` funnel has already posted the bridge's error to chat).
  */
-async function validateAndStore(requestBody) {
+async function validateAndStore(requestBody, { storeKey, existingEntry } = {}) {
     const result = await run(() => bridgeFetch('/v1/party/validate', { method: 'POST', body: requestBody }));
     if (!result) return null;
 
     const settings = getSettings();
     const level = Number(requestBody.build?.level) || 1;
+    const hpMax = result.member.hp_max;
+    const hpCurrent = requestBody.hp_current !== undefined
+        ? (result.member.hp_current ?? hpMax)
+        : existingEntry
+            ? Math.min(existingEntry.hp_current ?? hpMax, hpMax)
+            : (result.member.hp_current ?? hpMax);
+
     const entry = {
         ...requestBody,
         entity_id: result.member.entity_id,
-        hp_max: result.member.hp_max,
-        hp_current: result.member.hp_current ?? result.member.hp_max,
-        dice_remaining: level,
+        hp_max: hpMax,
+        hp_current: hpCurrent,
+        dice_remaining: existingEntry?.dice_remaining ?? level,
         summary: result.summary,
     };
-    settings.roster[requestBody.name] = entry;
+    settings.roster[storeKey ?? requestBody.name] = entry;
     saveSettings();
     await postToChat(`✅ ${result.summary}`);
     return entry;
@@ -432,27 +454,55 @@ function registerCommands() {
             SlashCommandNamedArgument.fromProps({ name: 'equipment', typeList: ARGUMENT_TYPE.STRING }),
         ],
         async (named) => {
-            if (!named?.name || !named.class || !named.species || !named.level) {
+            if (!named?.name) {
                 await postToChat('⚠️ nat20: /nat20-pc needs name=, class=, species=, and level=, e.g. ' +
                     '/nat20-pc name=Elara class=wizard species=elf-high level=3 str=8 dex=14 con=13 int=15 wis=12 cha=10');
                 return '';
             }
 
+            // Case-insensitive: re-running /nat20-pc on an already-known PC
+            // (any casing) updates that same roster slot instead of creating
+            // a second one (findRosterEntry is what every other command uses
+            // to look PCs up, so staying consistent with it here matters).
+            const roster = getSettings().roster ?? {};
+            const existing = findRosterEntry(roster, String(named.name));
+            const storeKey = existing ? Object.keys(roster).find((k) => roster[k] === existing) : undefined;
+            const existingBuild = existing?.build ?? {};
+
+            if (!existing && (!named.class || !named.species || !named.level)) {
+                await postToChat('⚠️ nat20: new PCs need class=, species=, and level=, e.g. ' +
+                    '/nat20-pc name=Elara class=wizard species=elf-high level=3 str=8 dex=14 con=13 int=15 wis=12 cha=10');
+                return '';
+            }
+
+            // Merge onto the existing build so an update that only passes
+            // e.g. level= doesn't revert every omitted field (ability
+            // scores back to 10, equipment/spells to empty) — new PCs have
+            // no existingBuild, so this is a no-op for them.
             const requestBody = {
-                name: String(named.name),
+                name: existing ? existing.name : String(named.name),
                 build: {
-                    species_slug: normalizeSlug(named.species),
-                    class_slug: normalizeSlug(named.class),
-                    level: Number(named.level),
-                    ability_scores: abilityScoresFromNamed(named),
-                    equipment: parseCommaList(named.equipment).map(normalizeSlug),
+                    species_slug: named.species ? normalizeSlug(named.species) : existingBuild.species_slug,
+                    class_slug: named.class ? normalizeSlug(named.class) : existingBuild.class_slug,
+                    level: (named.level !== undefined && named.level !== null && named.level !== '')
+                        ? Number(named.level) : existingBuild.level,
+                    ability_scores: abilityScoresFromNamed(named, existingBuild.ability_scores),
+                    equipment: (named.equipment !== undefined && named.equipment !== null && named.equipment !== '')
+                        ? parseCommaList(named.equipment).map(normalizeSlug)
+                        : (existingBuild.equipment ?? []),
                 },
             };
-            if (named.subclass) requestBody.build.subclass_slug = normalizeSlug(named.subclass);
-            const spells = parseCommaList(named.spells).map(normalizeSlug);
+            const subclassSlug = named.subclass ? normalizeSlug(named.subclass) : existingBuild.subclass_slug;
+            if (subclassSlug) requestBody.build.subclass_slug = subclassSlug;
+
+            const spells = (named.spells !== undefined && named.spells !== null && named.spells !== '')
+                ? parseCommaList(named.spells).map(normalizeSlug)
+                : (existing?.spells_known ?? []);
             if (spells.length) requestBody.spells_known = spells;
 
-            const entry = await validateAndStore(requestBody);
+            if (existing?.entity_id) requestBody.entity_id = existing.entity_id;
+
+            const entry = await validateAndStore(requestBody, { storeKey, existingEntry: existing });
             return entry?.entity_id ?? '';
         });
 
@@ -544,6 +594,12 @@ function registerCommands() {
                 hp_current: entry.hp_current,
             };
 
+            // Mutate-then-validate, with a rollback on rejection below: relies on
+            // bridgeFetch's JSON.stringify(body) happening synchronously before
+            // its `await fetch(...)`, so `requestBody` (built from `entry.build`,
+            // already carrying the pushed slug) is serialized before any later
+            // mutation could touch it. Correct today, but fragile — if bridgeFetch
+            // ever stringifies lazily (e.g. after an await), this needs revisiting.
             const result = await run(() => bridgeFetch('/v1/party/validate', { method: 'POST', body: requestBody }));
             if (!result) {
                 entry.build.equipment.pop(); // validate rejected it — roll back the append
