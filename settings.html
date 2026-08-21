@@ -15,12 +15,24 @@
             <hr />
 
             <label for="nat20_homebrew_json">Homebrew JSON</label>
+            <div class="flex-container">
+                <select id="nat20_homebrew_category" class="text_pole flex1">
+                    <option value="items" selected>Items</option>
+                    <option value="monsters">Monsters</option>
+                    <option value="spells">Spells</option>
+                    <option value="species">Species</option>
+                    <option value="classes">Classes</option>
+                    <option value="subclasses">Subclasses</option>
+                    <option value="backgrounds">Backgrounds</option>
+                    <option value="feats">Feats</option>
+                    <option value="features">Features</option>
+                </select>
+            </div>
             <textarea id="nat20_homebrew_json" class="text_pole textarea_compact" rows="6"
                 placeholder="Paste homebrew item/spell/monster JSON here"></textarea>
             <div class="flex-container">
                 <input id="nat20_homebrew_import" class="menu_button" type="submit" value="Import homebrew" />
             </div>
-            <span id="nat20_homebrew_status" class="nat20-status"></span>
         </div>
     </div>
 </div>

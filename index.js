@@ -118,7 +118,8 @@ async function onTestConnectionClick() {
 }
 
 async function onHomebrewImportClick() {
-    const $status = $('#nat20_homebrew_status');
+    const $status = $('#nat20_status');
+    const category = $('#nat20_homebrew_category').val();
     const raw = $('#nat20_homebrew_json').val();
     let payload;
     try {
@@ -128,10 +129,12 @@ async function onHomebrewImportClick() {
         return;
     }
     try {
-        // Endpoint/shape finalized in a later task; this wires the button
-        // through bridgeFetch so it's ready once that lands.
-        await bridgeFetch('/v1/homebrew', { method: 'POST', body: payload });
-        setStatus($status, true, 'Imported.');
+        // POST /v1/homebrew/{category} with the raw entry JSON as the body;
+        // category is one of items/monsters/spells/species/classes/
+        // subclasses/backgrounds/feats/features. Success returns the entry's
+        // slug; failure carries the server's `detail` message.
+        const result = await bridgeFetch(`/v1/homebrew/${category}`, { method: 'POST', body: payload });
+        setStatus($status, true, `Imported as "${result.slug}".`);
     } catch (err) {
         setStatus($status, false, err.message);
     }

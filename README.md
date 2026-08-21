@@ -51,9 +51,11 @@ Populated as slash commands land (Task 14).
 ## Settings
 
 - **Bridge URL** — base URL of the running `nat20-bridge` process.
-- **Homebrew JSON** — paste homebrew item/spell/monster JSON and click
-  **Import homebrew** to send it to the bridge. (Endpoint shape may still
-  change; see BACKLOG in the nat20 repo.)
+- **Homebrew JSON** — pick a category (items, monsters, spells, species,
+  classes, subclasses, backgrounds, feats, features), paste the raw entry
+  JSON, and click **Import homebrew** to `POST` it to
+  `/v1/homebrew/{category}` on the bridge. Success shows the returned slug;
+  failure shows the bridge's error message.
 
 Settings persist under SillyTavern's `extensionSettings.nat20`:
 
