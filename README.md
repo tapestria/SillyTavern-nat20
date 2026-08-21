@@ -42,11 +42,33 @@ an external sidecar it calls over HTTP.
 
 ## Command reference
 
-Populated as slash commands land (Task 14).
+| Command | Description |
+| --- | --- |
+| `/nat20-roll <dice>` | Roll dice via the bridge, e.g. `/nat20-roll 2d6+3`. |
+| `/nat20-check <skill> pc=<name> [dc=<n>]` | Skill check for a roster PC, e.g. `/nat20-check stealth pc=Elara dc=15`. |
+| `/nat20-save <ability> pc=<name> [dc=<n>]` | Saving throw for a roster PC, e.g. `/nat20-save dex pc=Elara dc=15`. |
+| `/nat20-lookup <name>` | Look up an SRD entry by name across spells/items/monsters/etc, e.g. `/nat20-lookup fireball`. |
+| `/nat20-pc name=<n> class=<slug> species=<slug> [subclass=<slug>] level=<n> str= dex= con= int= wis= cha= [spells=<a,b>] [equipment=<a,b>]` | Create or update (case-insensitive, in place) a roster PC. |
+| `/nat20-pc-import <json>` | Import a roster PC from raw `/v1/party/validate`-shaped JSON. |
+| `/nat20-party` | List roster PCs with class/level/HP/summary. |
+| `/nat20-pc-remove <name>` | Remove a PC from the roster. |
+| `/nat20-equip <name> <item-slug>` | Add an item to a PC's equipment and re-validate, e.g. `/nat20-equip Elara hb-frost-brand`. |
+| `/nat20-rest short pc=<name> dice=<n>` / `/nat20-rest long pc=<name>` | Short or long rest for a roster PC. |
+| `/nat20-fight <monster-slug>... [party=<name,name,...>]` | Start a combat against the given monster slugs (each instantiated separately, so repeat a slug for multiple copies). `party=` defaults to the whole roster; errors if the roster is empty. Stores the returned `combat_id` for subsequent turn commands. |
+| `/nat20-attack <target> weapon=<slug> [pc=<name>]` | Submit an attack intent. `pc=` picks the acting PC explicitly; otherwise defaults to the current actor if it's a roster PC. `<target>` matches an `entity_id` exactly or a combatant name by case-insensitive prefix (errors on no match or ambiguous matches). |
+| `/nat20-cast <spell-slug> [<target>] [pc=<name>]` | Submit a cast-spell intent; target is optional for self-targeted spells. |
+| `/nat20-use-item <item-slug> [<target>] [pc=<name>]` | Submit a use-item intent. |
+| `/nat20-feature <feature-slug> [<target>] [pc=<name>]` | Submit a use-feature intent (class features). |
+| `/nat20-next` | Advance the current monster's turn. |
+| `/nat20-status` | Render a markdown table of the current round's turn order, HP, and conditions, with `➤` marking the current actor. |
+| `/nat20-end` | End the active combat, post the outcome (`ended_reason`, XP, loot if present), and clear the stored combat id. |
+| `/nat20-forge-item name="<name>" base=<slug> [bonus=<n>] [damage=<XdY:type>]` | Forge a magic item via `/v1/forge/item`, e.g. `/nat20-forge-item name="Frost Brand" base=longsword damage=1d6:cold bonus=1`. |
+| `/nat20-homebrew-import <json> [category=<cat>]` | Import homebrew content via `/v1/homebrew/{category}` (default `items`); same endpoint the settings-panel importer uses. |
 
-| Command | Description | Status |
-| --- | --- | --- |
-| _(none yet)_ | | |
+Every combat-turn command errors with "no active combat" if none is running
+(start one with `/nat20-fight`), and every combat-envelope response
+auto-posts "⚔️ Combat over." and clears the stored combat id once the bridge
+reports `over: true`.
 
 ## Settings
 
@@ -76,13 +98,35 @@ Settings persist under SillyTavern's `extensionSettings.nat20`:
 
 ## Manual smoke test
 
-_(Filled in with the Task 14 Step 4 script — run this after installing the
-extension and starting the bridge to confirm the end-to-end path works.)_
+Run this after installing the extension and starting the bridge to confirm
+the end-to-end path works. Each step's expected chat output is shown as a
+loose shape — exact wording/rolls will vary.
 
 1. Start `nat20-bridge`.
 2. Load SillyTavern, open the Nat20 extension panel, click **Test
-   connection** — expect a green `bridge … · engine … · data …` status.
-3. _(more steps land with Task 14)_
+   connection**.
+   - Expect: a green status line `bridge <ver> · engine <ver> · data <ver>`.
+3. `/nat20-pc name=Elara class=wizard species=elf-high level=3 str=8 dex=14 con=13 int=15 wis=12 cha=10 spells=fire-bolt,magic-missile`
+   - Expect: `✅ Elara — <class/level/HP summary>` in chat.
+4. `/nat20-forge-item name="Frost Brand" base=quarterstaff damage=1d6:cold bonus=1`
+   - Expect: `🔨 <forged-item summary>` in chat (a slug like `hb-frost-brand`).
+5. `/nat20-equip Elara hb-frost-brand`
+   - Expect: `✅ Elara — <updated summary including the new item>`.
+6. `/nat20-fight goblin-warrior`
+   - Expect: the fight's opening narration block posted to chat (round 1,
+     initiative order established).
+7. `/nat20-status`
+   - Expect: a markdown table (`| | Name | HP | Conditions |`) with `➤`
+     marking whoever's turn it is.
+8. If it's Elara's turn: `/nat20-attack goblin weapon=quarterstaff` (or
+   `/nat20-cast fire-bolt goblin`). If it's the goblin's turn: `/nat20-next`.
+   - Expect: narration of the attack/spell/monster-turn's outcome; repeat
+     this step (checking `/nat20-status` as needed) until the bridge reports
+     the fight over.
+   - Expect on the finishing round: `⚔️ Combat over.` posted automatically.
+9. `/nat20-end`
+   - Expect: `🏁 Combat ended — <victory/defeat_tpk/flee/forced>` with XP/loot
+     if the bridge returned any.
 
 ## License
 

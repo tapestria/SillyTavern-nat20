@@ -10,6 +10,12 @@ const MODULE = 'nat20';
 const EXTENSION_ID = 'SillyTavern-nat20';
 const DEFAULTS = { bridgeUrl: 'http://127.0.0.1:8020', roster: {} };
 
+// The bridge combat_id of the in-progress fight, if any — module-level
+// because it outlives any single slash-command invocation (turn commands
+// need it) but doesn't belong in persisted settings (a combat doesn't
+// survive a page reload the way the roster does).
+let activeCombatId = null;
+
 /**
  * @returns {ReturnType<typeof SillyTavern.getContext>}
  */
@@ -397,6 +403,134 @@ async function getHitDieSize(classSlug) {
     return size;
 }
 
+/**
+ * Projects a roster entry down to the exact shape /v1/combat accepts for a
+ * party member — the roster entry itself carries extra bookkeeping fields
+ * (hp_max, dice_remaining, summary) the bridge's combat-start model does not
+ * declare and will reject as unknown fields, so this must be an explicit
+ * allow-list, never a spread.
+ * @param {object} entry
+ */
+function projectPartyMember(entry) {
+    return {
+        name: entry.name,
+        entity_id: entry.entity_id,
+        build: entry.build,
+        spells_known: entry.spells_known ?? [],
+        hp_current: entry.hp_current,
+    };
+}
+
+/**
+ * Posts a combat envelope's narration block to chat and, if the fight just
+ * ended, follows up with the standard "combat over" line and clears
+ * `activeCombatId` so subsequent turn commands correctly report no active
+ * combat.
+ * @param {{narration?: string, over?: boolean}} result
+ */
+async function postCombatResult(result) {
+    if (result.narration) await postToChat(result.narration);
+    if (result.over) {
+        await postToChat('⚔️ Combat over.');
+        activeCombatId = null;
+    }
+}
+
+/**
+ * Resolves a user-typed target reference against a combat view's `order`
+ * list: an exact `entity_id` match wins outright, otherwise falls back to a
+ * case-insensitive prefix match on combatant name (so "goblin" can hit
+ * "Goblin Warrior 1" without the caller knowing the synthesized entity id).
+ * @param {Array<{entity_id: string, name: string}>} order
+ * @param {string} targetText
+ * @returns {{entityId: string}|{error: string}}
+ */
+function resolveTarget(order, targetText) {
+    const text = String(targetText ?? '').trim();
+    if (!text) return { error: 'no target specified' };
+
+    const exact = order.find((o) => o.entity_id === text);
+    if (exact) return { entityId: exact.entity_id };
+
+    const lower = text.toLowerCase();
+    const matches = order.filter(
+        (o) => typeof o.name === 'string' && o.name.toLowerCase().startsWith(lower),
+    );
+    if (matches.length === 1) return { entityId: matches[0].entity_id };
+    if (matches.length === 0) return { error: `no combatant matching "${text}"` };
+    return {
+        error: `ambiguous target "${text}" — matches: ${matches.map((m) => m.name).join(', ')}`,
+    };
+}
+
+// Splits a turn-command's raw unnamed-arg text into a leading slug token
+// (spell/item/feature id) and whatever's left as the target reference — used
+// by /nat20-cast, /nat20-use-item, and /nat20-feature, whose target (unlike
+// /nat20-attack's) can be omitted entirely for self-targeted uses.
+function parseSlugAndTarget(raw) {
+    const text = String(raw ?? '').trim();
+    const match = /^(\S+)\s*(.*)$/.exec(text);
+    if (!match) return { slug: '', target: '' };
+    return { slug: match[1], target: match[2].trim() };
+}
+
+/**
+ * Shared submit path for the four in-combat turn commands (attack, cast,
+ * use-item, feature): resolves the acting PC (explicit `pc=` or, failing
+ * that, the current actor if it's a roster PC), resolves an optional target
+ * reference against the live combat view, and posts `/v1/combat/{id}/intent`.
+ * @param {string} intentType e.g. 'attack', 'cast_spell', 'use_item', 'use_feature'.
+ * @param {string} idField The intent body field the slug rides in, e.g. 'weapon_id'.
+ * @param {string} slugValue The raw (un-normalized) slug typed by the user.
+ * @param {Record<string, string|undefined>} named Command named args (`pc=`, etc.).
+ * @param {string} targetText Raw target text, or '' for no target.
+ * @returns {Promise<string>} The resolved target/actor entity_id, or '' on error.
+ */
+async function submitIntent(intentType, idField, slugValue, named, targetText) {
+    if (!activeCombatId) {
+        await postToChat('⚠️ nat20: no active combat — start one with /nat20-fight');
+        return '';
+    }
+
+    const view = await run(() => bridgeFetch(`/v1/combat/${activeCombatId}`));
+    if (!view) return '';
+
+    const roster = getSettings().roster ?? {};
+    let actorId;
+    if (named?.pc) {
+        const entry = findRosterEntry(roster, String(named.pc));
+        if (!entry?.entity_id) {
+            await postToChat(`⚠️ nat20: no roster PC named "${named.pc}" — add one with /nat20-pc`);
+            return '';
+        }
+        actorId = entry.entity_id;
+    } else {
+        const isRosterPc = Object.values(roster).some((e) => e.entity_id === view.current_actor);
+        if (!isRosterPc) {
+            await postToChat("⚠️ nat20: not a PC's turn — specify pc=<name>");
+            return '';
+        }
+        actorId = view.current_actor;
+    }
+
+    const body = { actor_id: actorId, intent_type: intentType };
+    if (idField && slugValue) body[idField] = normalizeSlug(slugValue);
+
+    if (targetText) {
+        const resolved = resolveTarget(view.order ?? [], targetText);
+        if (resolved.error) {
+            await postToChat(`⚠️ nat20: ${resolved.error}`);
+            return '';
+        }
+        body.target_id = resolved.entityId;
+    }
+
+    const result = await run(() => bridgeFetch(`/v1/combat/${activeCombatId}/intent`, { method: 'POST', body }));
+    if (!result) return '';
+    await postCombatResult(result);
+    return body.target_id ?? actorId;
+}
+
 function registerCommands() {
     const { SlashCommandParser, SlashCommand, SlashCommandNamedArgument,
         ARGUMENT_TYPE } = getCtx();
@@ -679,6 +813,215 @@ function registerCommands() {
             await postToChat(`💤 ${entry.name} takes a ${restKind} rest — heals ${result.healed}, ` +
                 `HP ${entry.hp_current}/${entry.hp_max}, hit dice remaining ${entry.dice_remaining}`);
             return String(entry.hp_current);
+        });
+
+    cmd('nat20-fight',
+        'Start a combat: /nat20-fight goblin-warrior goblin-warrior party=Elara,Brom (party defaults to the whole roster)',
+        [
+            SlashCommandNamedArgument.fromProps({ name: 'party', typeList: ARGUMENT_TYPE.STRING }),
+        ],
+        async (named, args) => {
+            const monsters = String(args ?? '').trim().split(/\s+/).filter(Boolean).map(normalizeSlug);
+            if (!monsters.length) {
+                await postToChat('⚠️ nat20: /nat20-fight needs at least one monster slug, e.g. /nat20-fight goblin-warrior');
+                return '';
+            }
+
+            const roster = getSettings().roster ?? {};
+            let entries;
+            if (named?.party) {
+                entries = [];
+                for (const name of parseCommaList(named.party)) {
+                    const entry = findRosterEntry(roster, name);
+                    if (!entry) {
+                        await postToChat(`⚠️ nat20: no roster PC named "${name}"`);
+                        return '';
+                    }
+                    entries.push(entry);
+                }
+            } else {
+                entries = Object.values(roster);
+            }
+
+            if (!entries.length) {
+                await postToChat('⚠️ nat20: No party — create one with /nat20-pc first');
+                return '';
+            }
+
+            const body = {
+                party: entries.map(projectPartyMember),
+                monsters,
+                seed: Math.floor(Math.random() * 2 ** 31),
+            };
+
+            const result = await run(() => bridgeFetch('/v1/combat', { method: 'POST', body }));
+            if (!result) return '';
+
+            activeCombatId = result.combat_id;
+            await postCombatResult(result);
+            return activeCombatId ?? '';
+        });
+
+    cmd('nat20-attack',
+        'Attack in combat: /nat20-attack <target> weapon=<slug> pc=<name>',
+        [
+            SlashCommandNamedArgument.fromProps({ name: 'weapon', typeList: ARGUMENT_TYPE.STRING }),
+            SlashCommandNamedArgument.fromProps({ name: 'pc', typeList: ARGUMENT_TYPE.STRING }),
+        ],
+        async (named, args) => {
+            const target = String(args ?? '').trim();
+            if (!target) {
+                await postToChat('⚠️ nat20: /nat20-attack needs a target, e.g. /nat20-attack goblin weapon=longsword');
+                return '';
+            }
+            return submitIntent('attack', 'weapon_id', named?.weapon, named, target);
+        });
+
+    cmd('nat20-cast',
+        'Cast a spell in combat: /nat20-cast <spell-slug> <target> pc=<name>',
+        [
+            SlashCommandNamedArgument.fromProps({ name: 'pc', typeList: ARGUMENT_TYPE.STRING }),
+        ],
+        async (named, args) => {
+            const { slug, target } = parseSlugAndTarget(args);
+            if (!slug) {
+                await postToChat('⚠️ nat20: /nat20-cast needs a spell slug, e.g. /nat20-cast fire-bolt goblin');
+                return '';
+            }
+            return submitIntent('cast_spell', 'spell_id', slug, named, target);
+        });
+
+    cmd('nat20-use-item',
+        'Use an item in combat: /nat20-use-item <item-slug> <target> pc=<name>',
+        [
+            SlashCommandNamedArgument.fromProps({ name: 'pc', typeList: ARGUMENT_TYPE.STRING }),
+        ],
+        async (named, args) => {
+            const { slug, target } = parseSlugAndTarget(args);
+            if (!slug) {
+                await postToChat('⚠️ nat20: /nat20-use-item needs an item slug, e.g. /nat20-use-item potion-of-healing');
+                return '';
+            }
+            return submitIntent('use_item', 'item_id', slug, named, target);
+        });
+
+    cmd('nat20-feature',
+        'Use a class feature in combat: /nat20-feature <feature-slug> <target> pc=<name>',
+        [
+            SlashCommandNamedArgument.fromProps({ name: 'pc', typeList: ARGUMENT_TYPE.STRING }),
+        ],
+        async (named, args) => {
+            const { slug, target } = parseSlugAndTarget(args);
+            if (!slug) {
+                await postToChat('⚠️ nat20: /nat20-feature needs a feature slug, e.g. /nat20-feature second-wind');
+                return '';
+            }
+            return submitIntent('use_feature', 'feature_id', slug, named, target);
+        });
+
+    cmd('nat20-next', 'Advance the current monster\'s turn', [],
+        async () => {
+            if (!activeCombatId) {
+                await postToChat('⚠️ nat20: no active combat — start one with /nat20-fight');
+                return '';
+            }
+            const result = await run(() => bridgeFetch(`/v1/combat/${activeCombatId}/advance-monster`, { method: 'POST', body: {} }));
+            if (!result) return '';
+            await postCombatResult(result);
+            return activeCombatId ?? '';
+        });
+
+    cmd('nat20-status', 'Show the current combat round, turn order, HP, and conditions', [],
+        async () => {
+            if (!activeCombatId) {
+                await postToChat('⚠️ nat20: no active combat — start one with /nat20-fight');
+                return '';
+            }
+            const view = await run(() => bridgeFetch(`/v1/combat/${activeCombatId}`));
+            if (!view) return '';
+
+            const rows = (view.order ?? []).map((o) => {
+                const marker = o.entity_id === view.current_actor ? '➤' : '';
+                const conditions = [o.dead ? 'dead' : null, ...(o.conditions ?? [])].filter(Boolean).join(', ');
+                return `| ${marker} | ${o.name} | ${o.hp}/${o.max_hp} | ${conditions} |`;
+            });
+            const table = [
+                '| | Name | HP | Conditions |',
+                '| --- | --- | --- | --- |',
+                ...rows,
+            ].join('\n');
+
+            await postToChat(`📊 **Round ${view.round_number}**\n${table}`);
+            return String(view.round_number);
+        });
+
+    cmd('nat20-end', 'End the current combat and show the outcome', [],
+        async () => {
+            if (!activeCombatId) {
+                await postToChat('⚠️ nat20: no active combat — start one with /nat20-fight');
+                return '';
+            }
+            const result = await run(() => bridgeFetch(`/v1/combat/${activeCombatId}/end`, { method: 'POST', body: {} }));
+            if (!result) return '';
+            activeCombatId = null;
+
+            const outcome = result.outcome ?? {};
+            let msg = `🏁 Combat ended — ${outcome.ended_reason ?? 'unknown'}`;
+            if (outcome.xp !== undefined) msg += ` — XP: ${outcome.xp}`;
+            if (outcome.loot) {
+                msg += ` — Loot: ${Array.isArray(outcome.loot) ? outcome.loot.join(', ') : outcome.loot}`;
+            }
+            if (result.narration) msg += `\n${result.narration}`;
+            await postToChat(msg);
+            return outcome.ended_reason ?? '';
+        });
+
+    cmd('nat20-homebrew-import',
+        'Import homebrew content: /nat20-homebrew-import {"name":"Frost Brand",...} category=items (default: items)',
+        [
+            SlashCommandNamedArgument.fromProps({ name: 'category', typeList: ARGUMENT_TYPE.STRING }),
+        ],
+        async (named, raw) => {
+            let payload;
+            try {
+                payload = JSON.parse(String(raw));
+            } catch {
+                await postToChat('⚠️ nat20: /nat20-homebrew-import needs valid JSON, e.g. ' +
+                    '/nat20-homebrew-import {"name":"Frost Brand"} category=items');
+                return '';
+            }
+            const category = named?.category ? String(named.category).trim() : 'items';
+            const result = await run(() => bridgeFetch(`/v1/homebrew/${category}`, { method: 'POST', body: payload }));
+            if (!result) return '';
+            await postToChat(`✅ Imported as "${result.slug}".`);
+            return result.slug ?? '';
+        });
+
+    cmd('nat20-forge-item',
+        'Forge a magic item: /nat20-forge-item name="Frost Brand" base=longsword damage=1d6:cold bonus=1',
+        [
+            SlashCommandNamedArgument.fromProps({ name: 'name', typeList: ARGUMENT_TYPE.STRING }),
+            SlashCommandNamedArgument.fromProps({ name: 'base', typeList: ARGUMENT_TYPE.STRING }),
+            SlashCommandNamedArgument.fromProps({ name: 'bonus', typeList: ARGUMENT_TYPE.NUMBER }),
+            SlashCommandNamedArgument.fromProps({ name: 'damage', typeList: ARGUMENT_TYPE.STRING }),
+        ],
+        async (named) => {
+            if (!named?.name || !named?.base) {
+                await postToChat('⚠️ nat20: /nat20-forge-item needs name= and base=, e.g. ' +
+                    '/nat20-forge-item name="Frost Brand" base=longsword damage=1d6:cold bonus=1');
+                return '';
+            }
+
+            const body = { name: String(named.name), base: normalizeSlug(named.base) };
+            if (named.bonus !== undefined && named.bonus !== null && named.bonus !== '') {
+                body.bonus = Number(named.bonus);
+            }
+            if (named.damage) body.extra_damage = String(named.damage);
+
+            const result = await run(() => bridgeFetch('/v1/forge/item', { method: 'POST', body }));
+            if (!result) return '';
+            await postToChat(`🔨 ${result.summary}`);
+            return result.slug ?? '';
         });
 }
 
