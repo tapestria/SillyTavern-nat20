@@ -685,9 +685,12 @@ function registerCommands() {
 
             const lines = names.map((key) => {
                 const entry = roster[key];
+                if (entry.summary) {
+                    return `- ${entry.summary}`;
+                }
                 const classLevel = entry.build ? `${entry.build.class_slug} ${entry.build.level}` : '';
                 const hp = `HP ${entry.hp_current}/${entry.hp_max}`;
-                return `- **${entry.name}** (${classLevel}) — ${hp}${entry.summary ? ` — ${entry.summary}` : ''}`;
+                return `- **${entry.name}** (${classLevel}) — ${hp}`;
             });
             await postToChat(`🎭 **Party**\n${lines.join('\n')}`);
             return String(names.length);
