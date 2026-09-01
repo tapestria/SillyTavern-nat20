@@ -21,3 +21,103 @@
 .nat20-status.nat20-status--error {
     color: #f44336;
 }
+
+/* Battlefield map (/nat20-map) — see grid.js. The wall overlay is absolutely
+   positioned over the cell track, so both layers share --nat20-cell. */
+.custom-nat20-grid-wrap {
+    position: relative;
+    display: inline-block;
+    margin-top: 6px;
+    --nat20-cell: 1.8rem;
+}
+
+.custom-nat20-grid {
+    display: grid;
+    grid-template-columns: repeat(var(--nat20-cols), var(--nat20-cell));
+    grid-auto-rows: var(--nat20-cell);
+}
+
+.custom-nat20-cell {
+    position: relative;
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    box-sizing: border-box;
+    border: 1px solid rgba(128, 128, 128, 0.35);
+    font-size: 0.62rem;
+}
+
+.custom-nat20-cell.custom-nat20-blocked {
+    background: rgba(128, 128, 128, 0.55);
+}
+
+.custom-nat20-cell.custom-nat20-difficult {
+    background: rgba(205, 133, 63, 0.28);
+}
+
+.custom-nat20-cell.custom-nat20-cover_half,
+.custom-nat20-cell.custom-nat20-cover_three_quarters,
+.custom-nat20-cell.custom-nat20-cover_total {
+    background: rgba(70, 130, 180, 0.28);
+}
+
+.custom-nat20-token {
+    position: relative;
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    width: 88%;
+    height: 88%;
+    border-radius: 50%;
+    font-weight: bold;
+    text-transform: uppercase;
+    color: #fff;
+}
+
+.custom-nat20-token.custom-nat20-pc {
+    background: #2e7d32;
+}
+
+.custom-nat20-token.custom-nat20-foe {
+    background: #b71c1c;
+}
+
+.custom-nat20-token.custom-nat20-current {
+    outline: 2px solid #ffd54f;
+}
+
+.custom-nat20-token.custom-nat20-dead {
+    opacity: 0.4;
+    text-decoration: line-through;
+}
+
+/* Co-occupancy is legal in the engine, so a cell can hold several tokens;
+   they overlap and the badge reports how many are really there. */
+.custom-nat20-cell .custom-nat20-token + .custom-nat20-token {
+    position: absolute;
+    left: 18%;
+    top: 18%;
+}
+
+.custom-nat20-stack {
+    position: absolute;
+    right: -2px;
+    bottom: -2px;
+    padding: 0 3px;
+    border-radius: 6px;
+    background: #ffd54f;
+    color: #000;
+    font-size: 0.55rem;
+    font-style: normal;
+}
+
+.custom-nat20-walls {
+    position: absolute;
+    inset: 0;
+    pointer-events: none;
+}
+
+.custom-nat20-wall {
+    position: absolute;
+    background: #ffd54f;
+}
