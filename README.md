@@ -70,6 +70,7 @@ help text for e.g. `/nat20-attack` reads elsewhere — always put `weapon=`,
 | `/nat20-feature [pc=<name>] [activity=<id>] <feature-slug> [<target>]` | Submit a use-feature intent (class features); `activity=` picks one option of a multi-option feature such as Channel Divinity. |
 | `/nat20-next` | Advance the current monster's turn. If the engine can't resolve the action the foe picked (a few stat blocks, listed in nat20's backlog), it says so: retry, or `/nat20-end`. |
 | `/nat20-status` | Render a markdown table of the current round's turn order, HP, and conditions, with `➤` marking the current actor. |
+| `/nat20-map` | Draw the battlefield: a token per combatant on the bridge's grid, plus blocked/difficult/cover terrain and wall segments. The current actor is ringed, dead combatants struck through, and a cell holding several combatants shows a count badge. |
 | `/nat20-end` | End the active combat, post the outcome (`ended_reason`, XP, loot if present), and clear the stored combat id. |
 | `/nat20-forge-item name="<name>" base=<slug> [bonus=<n>] [damage=<XdY:type>]` | Forge a magic item via `/v1/forge/item`, e.g. `/nat20-forge-item name="Frost Brand" base=longsword damage=1d6:cold bonus=1`. |
 | `/nat20-homebrew-import <json> [category=<cat>]` | Import homebrew content via `/v1/homebrew/{category}` (default `items`); same endpoint the settings-panel importer uses. |
@@ -149,6 +150,21 @@ loose shape — exact wording/rolls will vary.
   even for skills/saves their class or background grants proficiency in.
 - Engine gaps (stat blocks it can't run yet, features that raise) are tracked
   in [nat20](https://github.com/tapestria/nat20)'s backlog.
+- **Monster movement ignores occupancy, so `/nat20-map` can stack tokens.**
+  PC moves honour occupied cells, but the engine's monster walk paths don't
+  (a documented asymmetry upstream), so a monster may end its move inside
+  another combatant's square. The map overlaps stacked tokens and shows a
+  count badge rather than hiding any, but the topmost token still covers
+  the others.
+
+## Development
+
+`grid.js` is pure (no SillyTavern globals, no network), so it is unit-tested
+with Node's built-in runner — no dependencies to install:
+
+```bash
+npm test
+```
 
 ## License
 

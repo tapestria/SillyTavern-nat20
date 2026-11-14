@@ -6,6 +6,8 @@
 // later tasks (slash commands, popups, etc.) should call the exports below
 // rather than reaching into `getCtx()` themselves.
 
+import { renderGrid } from './grid.js';
+
 const MODULE = 'nat20';
 const EXTENSION_ID = 'SillyTavern-nat20';
 const DEFAULTS = { bridgeUrl: 'http://127.0.0.1:8020', roster: {} };
@@ -1124,6 +1126,19 @@ function registerCommands() {
             const view = await run(() => combatFetch(''));
             if (!view) return '';
             await postToChat(renderStatus(view));
+            return String(view.round_number);
+        });
+
+    cmd('nat20-map', 'Draw the battlefield: who stands where, plus terrain and walls', [],
+        async () => {
+            if (!activeCombatId) {
+                await postToChat('⚠️ nat20: no active combat — start one with /nat20-fight');
+                return '';
+            }
+            const view = await run(() => combatFetch(''));
+            if (!view) return '';
+
+            await postToChat(`🗺️ **Round ${view.round_number}**\n${renderGrid(view)}`);
             return String(view.round_number);
         });
 
