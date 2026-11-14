@@ -6,7 +6,7 @@
     "js": "index.js",
     "css": "style.css",
     "author": "tapestria",
-    "version": "0.1.0",
+    "version": "0.2.0",
     "homePage": "https://github.com/tapestria/SillyTavern-nat20",
     "auto_update": false
 }
