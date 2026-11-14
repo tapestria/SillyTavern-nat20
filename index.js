@@ -1004,19 +1004,21 @@ function registerCommands() {
 
             const result = await run(async () => {
                 await requireBridgeVersion();
-                // The bridge keeps a fight live until /end, so a fight the
-                // user walked away from is ended here rather than left to
-                // hold one of the bridge's bounded combat slots.
-                if (activeCombatId) {
-                    await combatFetch('/end', { method: 'POST', body: {} }).catch((err) => {
-                        if (err.status !== 404) throw err;
-                    });
-                    clearActiveCombat();
-                }
                 return bridgeFetch('/v1/combat', { method: 'POST', body });
             });
             if (!result) return '';
 
+            // The bridge keeps a fight live until /end, so the one this
+            // replaces is ended rather than left to hold one of its bounded
+            // combat slots. Only after the new one started: a start the
+            // bridge refuses must not cost the user the fight in progress.
+            if (activeCombatId) {
+                const previous = await bridgeFetch(`/v1/combat/${activeCombatId}/end`, { method: 'POST', body: {} })
+                    .catch(() => null); // best-effort: a 404 means it's already gone
+                if (previous) {
+                    await postToChat(`🏁 Previous combat ended — ${previous.outcome?.ended_reason ?? 'unknown'}`);
+                }
+            }
             activeCombatId = result.combat_id;
             activePartyIds = new Set(entries.map((e) => e.entity_id));
             await postCombatResult(result);
@@ -1053,8 +1055,12 @@ function registerCommands() {
                 await postToChat('⚠️ nat20: /nat20-cast needs a spell slug, e.g. /nat20-cast pc=Elara fire-bolt goblin');
                 return '';
             }
-            return submitIntent('cast_spell', 'spell_id', slug, named, target,
-                { slot_level: optionalInt(named?.slot) });
+            const slotLevel = optionalInt(named?.slot);
+            if (slotLevel !== undefined && !(Number.isInteger(slotLevel) && slotLevel >= 1)) {
+                await postToChat(`⚠️ nat20: slot= needs a spell slot level (1–9), got "${named.slot}"`);
+                return '';
+            }
+            return submitIntent('cast_spell', 'spell_id', slug, named, target, { slot_level: slotLevel });
         });
 
     cmd('nat20-use-item',
