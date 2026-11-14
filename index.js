@@ -15,6 +15,9 @@ const DEFAULTS = { bridgeUrl: 'http://127.0.0.1:8020', roster: {} };
 // need it) but doesn't belong in persisted settings (a combat doesn't
 // survive a page reload the way the roster does).
 let activeCombatId = null;
+// The roster PCs' entity_ids in that fight: the view's order doesn't say who
+// is on which side, and a summon's side is its owner's (view.summons).
+let activePartyIds = new Set();
 
 /**
  * @returns {ReturnType<typeof SillyTavern.getContext>}
@@ -61,9 +64,50 @@ async function bridgeFetch(path, { method = 'GET', body } = {}) {
     }
     const data = await resp.json().catch(() => ({}));
     if (!resp.ok) {
-        throw new Error(data.detail ?? `bridge error ${resp.status}`);
+        const err = new Error(formatDetail(data.detail) ?? `bridge error ${resp.status}`);
+        err.status = resp.status;
+        throw err;
     }
     return data;
+}
+
+// A 422 for a body that doesn't validate carries FastAPI's list of errors
+// ({loc, msg}) as `detail`; every other error carries a string.
+function formatDetail(detail) {
+    if (!Array.isArray(detail)) return detail;
+    return detail
+        .map((e) => {
+            const field = (e?.loc ?? []).filter((part) => part !== 'body').join('.');
+            return field ? `${field}: ${e?.msg}` : String(e?.msg ?? JSON.stringify(e));
+        })
+        .join('; ');
+}
+
+// The oldest bridge this extension speaks to: 0.7.0 rolls every Initiative
+// itself, refuses unknown intent keys, and reports summons and the grid.
+const MIN_BRIDGE_VERSION = [0, 7, 0];
+
+function bridgeVersionOk(version) {
+    const parts = String(version ?? '').split('.').map((p) => parseInt(p, 10));
+    for (let i = 0; i < MIN_BRIDGE_VERSION.length; i++) {
+        const part = Number.isNaN(parts[i]) || parts[i] === undefined ? 0 : parts[i];
+        if (part !== MIN_BRIDGE_VERSION[i]) return part > MIN_BRIDGE_VERSION[i];
+    }
+    return true;
+}
+
+/**
+ * Throws unless the bridge reports a version this extension speaks to; an
+ * older bridge still starts a basic combat but answers later intents
+ * differently, so the mismatch surfaces up front instead of mid-fight.
+ */
+async function requireBridgeVersion() {
+    const health = await bridgeFetch('/v1/health');
+    if (!bridgeVersionOk(health.bridge)) {
+        throw new Error(`nat20-bridge ${health.bridge} is too old — this extension needs ` +
+            `${MIN_BRIDGE_VERSION.join('.')} or newer (\`uvx nat20-bridge@latest\`)`);
+    }
+    return health;
 }
 
 /**
@@ -116,7 +160,7 @@ async function onTestConnectionClick() {
     const $status = $('#nat20_status');
     setStatus($status, true, 'checking…');
     try {
-        const health = await bridgeFetch('/v1/health');
+        const health = await requireBridgeVersion();
         setStatus($status, true, `bridge ${health.bridge} · engine ${health.engine} · data ${health.data}`);
     } catch (err) {
         setStatus($status, false, err.message);
@@ -423,24 +467,79 @@ function projectPartyMember(entry) {
     };
 }
 
+function clearActiveCombat() {
+    activeCombatId = null;
+    activePartyIds = new Set();
+}
+
 /**
- * Posts a combat envelope's narration block to chat and, if the fight just
- * ended, follows up with the standard "combat over" line and clears
- * `activeCombatId` so subsequent turn commands correctly report no active
- * combat.
- * @param {{narration?: string, over?: boolean}} result
+ * Calls a route of the active combat. A 404 means the bridge ended it (it
+ * keeps a bounded number of combats live, and forgets them on restart), so
+ * the stored id is cleared rather than left to fail every later command.
+ * @param {string} subpath '' for the view, or e.g. '/intent'.
+ * @param {{method?: string, body?: object}} [options]
  */
-async function postCombatResult(result) {
-    if (result.narration) await postToChat(result.narration);
-    if (result.over) {
-        await postToChat('⚔️ Combat over.');
-        activeCombatId = null;
+async function combatFetch(subpath, options) {
+    try {
+        return await bridgeFetch(`/v1/combat/${activeCombatId}${subpath}`, options);
+    } catch (err) {
+        if (err.status === 404) {
+            clearActiveCombat();
+            err.message = 'the bridge no longer knows this combat (ended or expired) — start a new one with /nat20-fight';
+        }
+        throw err;
     }
 }
 
 /**
+ * Whether one side has no living combatant left. An intent's `over` flag
+ * stays false until /end, so a decided fight is read from the view's `dead`.
+ * Summons count for their owner's side.
+ * @returns {'foes'|'party'|null} The side that fell, if any.
+ */
+function fallenSide(view) {
+    const summons = view.summons ?? {};
+    const isParty = (id) => activePartyIds.has(id) || activePartyIds.has(summons[id]?.owner_id);
+    const order = view.order ?? [];
+    const foes = order.filter((o) => !isParty(o.entity_id));
+    const party = order.filter((o) => activePartyIds.has(o.entity_id));
+    if (foes.length && foes.every((o) => o.dead)) return 'foes';
+    if (party.length && party.every((o) => o.dead)) return 'party';
+    return null;
+}
+
+/**
+ * Posts a combat envelope's narration block to chat, then reads the view to
+ * tell the user when the fight is decided (only /end closes it).
+ * @param {{narration?: string}} result
+ */
+async function postCombatResult(result) {
+    if (result.narration) await postToChat(result.narration);
+    const view = await run(() => combatFetch(''));
+    const fallen = view && fallenSide(view);
+    if (fallen === 'foes') await postToChat('⚔️ Every foe is down — /nat20-end to settle the fight.');
+    else if (fallen === 'party') await postToChat('⚔️ The whole party is dead — /nat20-end to close the fight.');
+}
+
+/** The markdown turn-order table /nat20-status posts. */
+function renderStatus(view) {
+    const rows = (view.order ?? []).map((o) => {
+        const marker = o.entity_id === currentActorId(view) ? '➤' : '';
+        const conditions = [o.dead ? 'dead' : null, ...(o.conditions ?? [])].filter(Boolean).join(', ');
+        return `| ${marker} | ${o.name} | ${o.hp}/${o.max_hp} | ${conditions} |`;
+    });
+    const table = [
+        '| | Name | HP | Conditions |',
+        '| --- | --- | --- | --- |',
+        ...rows,
+    ].join('\n');
+    return `📊 **Round ${view.round_number}**\n${table}`;
+}
+
+/**
  * Resolves a user-typed target reference against a combat view's `order`
- * list: an exact `entity_id` match wins outright, otherwise falls back to a
+ * list: an exact `entity_id` match wins outright, then a case-insensitive
+ * whole-name match ("Bo" when "Bob" is also fighting), then a
  * case-insensitive prefix match on combatant name (so "goblin" can hit
  * "Goblin Warrior 1" without the caller knowing the synthesized entity id).
  * @param {Array<{entity_id: string, name: string}>} order
@@ -455,6 +554,8 @@ function resolveTarget(order, targetText) {
     if (exact) return { entityId: exact.entity_id };
 
     const lower = text.toLowerCase();
+    const named = order.filter((o) => typeof o.name === 'string' && o.name.toLowerCase() === lower);
+    if (named.length === 1) return { entityId: named[0].entity_id };
     const matches = order.filter(
         (o) => typeof o.name === 'string' && o.name.toLowerCase().startsWith(lower),
     );
@@ -485,46 +586,61 @@ function parseSlugAndTarget(raw) {
 }
 
 /**
+ * The creatures the user commands in this fight: the roster PCs in it, plus
+ * the summons they own. A summon acts under the entity_id its
+ * `combatant_joined` event carried, which is its key in `view.summons`.
+ * @returns {Array<{entity_id: string, name: string}>}
+ */
+function commandableRows(view) {
+    const summons = view.summons ?? {};
+    return (view.order ?? []).filter((o) =>
+        activePartyIds.has(o.entity_id) || activePartyIds.has(summons[o.entity_id]?.owner_id));
+}
+
+/**
  * Shared submit path for the four in-combat turn commands (attack, cast,
- * use-item, feature): resolves the acting PC (explicit `pc=` or, failing
- * that, the current actor if it's a roster PC), resolves an optional target
- * reference against the live combat view, and posts `/v1/combat/{id}/intent`.
+ * use-item, feature): resolves the actor (explicit `pc=`, naming a roster PC
+ * or a summon it owns, or failing that the current actor if it's one of
+ * those), resolves an optional target reference against the live combat
+ * view, and posts `/v1/combat/{id}/intent`.
  * @param {string} intentType e.g. 'attack', 'cast_spell', 'use_item', 'use_feature'.
  * @param {string} idField The intent body field the slug rides in, e.g. 'weapon_id'.
  * @param {string} slugValue The raw (un-normalized) slug typed by the user.
  * @param {Record<string, string|undefined>} named Command named args (`pc=`, etc.).
  * @param {string} targetText Raw target text, or '' for no target.
+ * @param {Record<string, string|number>} [extra] Further `PlayerIntent`
+ *   fields (slot_level, activity_id, stat_block_action_id); the bridge
+ *   refuses any key `PlayerIntent` doesn't declare.
  * @returns {Promise<string>} The resolved target/actor entity_id, or '' on error.
  */
-async function submitIntent(intentType, idField, slugValue, named, targetText) {
+async function submitIntent(intentType, idField, slugValue, named, targetText, extra = {}) {
     if (!activeCombatId) {
         await postToChat('⚠️ nat20: no active combat — start one with /nat20-fight');
         return '';
     }
 
-    const view = await run(() => bridgeFetch(`/v1/combat/${activeCombatId}`));
+    const view = await run(() => combatFetch(''));
     if (!view) return '';
 
-    const roster = getSettings().roster ?? {};
+    const commandable = commandableRows(view);
     let actorId;
     if (named?.pc) {
-        const entry = findRosterEntry(roster, String(named.pc));
-        if (!entry?.entity_id) {
-            await postToChat(`⚠️ nat20: no roster PC named "${named.pc}" — add one with /nat20-pc`);
+        const resolved = resolveTarget(commandable, String(named.pc));
+        if (resolved.error) {
+            await postToChat(`⚠️ nat20: pc=${named.pc}: ${resolved.error} among your party and its summons`);
             return '';
         }
-        actorId = entry.entity_id;
+        actorId = resolved.entityId;
     } else {
         const currentId = currentActorId(view);
-        const isRosterPc = Object.values(roster).some((e) => e.entity_id === currentId);
-        if (!isRosterPc) {
-            await postToChat("⚠️ nat20: not a PC's turn — specify pc=<name>");
+        if (!commandable.some((o) => o.entity_id === currentId)) {
+            await postToChat("⚠️ nat20: not your party's turn — specify pc=<name>, or /nat20-next for a foe");
             return '';
         }
         actorId = currentId;
     }
 
-    const body = { actor_id: actorId, intent_type: intentType };
+    const body = { actor_id: actorId, intent_type: intentType, ...extra };
     if (idField && slugValue) body[idField] = normalizeSlug(slugValue);
 
     if (targetText) {
@@ -536,10 +652,28 @@ async function submitIntent(intentType, idField, slugValue, named, targetText) {
         body.target_id = resolved.entityId;
     }
 
-    const result = await run(() => bridgeFetch(`/v1/combat/${activeCombatId}/intent`, { method: 'POST', body }));
-    if (!result) return '';
+    let result;
+    try {
+        result = await combatFetch('/intent', { method: 'POST', body });
+    } catch (err) {
+        await postToChat(`⚠️ nat20: ${err.message}`);
+        // A 422 the engine raised mid-resolution may already have spent the
+        // actor's Action or left it partway through a move: show where the
+        // turn stands now rather than leave the user to guess.
+        if (err.status === 422) {
+            const after = await run(() => combatFetch(''));
+            if (after) await postToChat(renderStatus(after));
+        }
+        return '';
+    }
     await postCombatResult(result);
     return body.target_id ?? actorId;
+}
+
+// A named arg as a whole number, or undefined when it wasn't given.
+function optionalInt(value) {
+    if (value === undefined || value === null || value === '') return undefined;
+    return Number(value);
 }
 
 function registerCommands() {
@@ -868,19 +1002,36 @@ function registerCommands() {
                 seed: Math.floor(Math.random() * 2 ** 31),
             };
 
-            const result = await run(() => bridgeFetch('/v1/combat', { method: 'POST', body }));
+            const result = await run(async () => {
+                await requireBridgeVersion();
+                return bridgeFetch('/v1/combat', { method: 'POST', body });
+            });
             if (!result) return '';
 
+            // The bridge keeps a fight live until /end, so the one this
+            // replaces is ended rather than left to hold one of its bounded
+            // combat slots. Only after the new one started: a start the
+            // bridge refuses must not cost the user the fight in progress.
+            if (activeCombatId) {
+                const previous = await bridgeFetch(`/v1/combat/${activeCombatId}/end`, { method: 'POST', body: {} })
+                    .catch(() => null); // best-effort: a 404 means it's already gone
+                if (previous) {
+                    await postToChat(`🏁 Previous combat ended — ${previous.outcome?.ended_reason ?? 'unknown'}`);
+                }
+            }
             activeCombatId = result.combat_id;
+            activePartyIds = new Set(entries.map((e) => e.entity_id));
             await postCombatResult(result);
             return activeCombatId ?? '';
         });
 
     cmd('nat20-attack',
-        'Attack in combat: /nat20-attack weapon=<slug> pc=<name> <target>',
+        'Attack in combat: /nat20-attack weapon=<slug> pc=<name> <target>  |  a summon: ' +
+        '/nat20-attack pc=<summon> action=<stat-block action, e.g. rend> <target>',
         [
             SlashCommandNamedArgument.fromProps({ name: 'weapon', typeList: ARGUMENT_TYPE.STRING }),
             SlashCommandNamedArgument.fromProps({ name: 'pc', typeList: ARGUMENT_TYPE.STRING }),
+            SlashCommandNamedArgument.fromProps({ name: 'action', typeList: ARGUMENT_TYPE.STRING }),
         ],
         async (named, args) => {
             const target = String(args ?? '').trim();
@@ -888,13 +1039,15 @@ function registerCommands() {
                 await postToChat('⚠️ nat20: /nat20-attack needs a target, e.g. /nat20-attack weapon=longsword goblin');
                 return '';
             }
-            return submitIntent('attack', 'weapon_id', named?.weapon, named, target);
+            const extra = named?.action ? { stat_block_action_id: normalizeSlug(named.action) } : {};
+            return submitIntent('attack', 'weapon_id', named?.weapon, named, target, extra);
         });
 
     cmd('nat20-cast',
-        'Cast a spell in combat: /nat20-cast pc=<name> <spell-slug> <target>',
+        'Cast a spell in combat: /nat20-cast pc=<name> [slot=<level>] <spell-slug> <target>',
         [
             SlashCommandNamedArgument.fromProps({ name: 'pc', typeList: ARGUMENT_TYPE.STRING }),
+            SlashCommandNamedArgument.fromProps({ name: 'slot', typeList: ARGUMENT_TYPE.NUMBER }),
         ],
         async (named, args) => {
             const { slug, target } = parseSlugAndTarget(args);
@@ -902,7 +1055,12 @@ function registerCommands() {
                 await postToChat('⚠️ nat20: /nat20-cast needs a spell slug, e.g. /nat20-cast pc=Elara fire-bolt goblin');
                 return '';
             }
-            return submitIntent('cast_spell', 'spell_id', slug, named, target);
+            const slotLevel = optionalInt(named?.slot);
+            if (slotLevel !== undefined && !(Number.isInteger(slotLevel) && slotLevel >= 1)) {
+                await postToChat(`⚠️ nat20: slot= needs a spell slot level (1–9), got "${named.slot}"`);
+                return '';
+            }
+            return submitIntent('cast_spell', 'spell_id', slug, named, target, { slot_level: slotLevel });
         });
 
     cmd('nat20-use-item',
@@ -920,9 +1078,10 @@ function registerCommands() {
         });
 
     cmd('nat20-feature',
-        'Use a class feature in combat: /nat20-feature pc=<name> <feature-slug> <target>',
+        'Use a class feature in combat: /nat20-feature pc=<name> [activity=<id>] <feature-slug> <target>',
         [
             SlashCommandNamedArgument.fromProps({ name: 'pc', typeList: ARGUMENT_TYPE.STRING }),
+            SlashCommandNamedArgument.fromProps({ name: 'activity', typeList: ARGUMENT_TYPE.STRING }),
         ],
         async (named, args) => {
             const { slug, target } = parseSlugAndTarget(args);
@@ -930,7 +1089,8 @@ function registerCommands() {
                 await postToChat('⚠️ nat20: /nat20-feature needs a feature slug, e.g. /nat20-feature second-wind');
                 return '';
             }
-            return submitIntent('use_feature', 'feature_id', slug, named, target);
+            const extra = named?.activity ? { activity_id: String(named.activity).trim() } : {};
+            return submitIntent('use_feature', 'feature_id', slug, named, target, extra);
         });
 
     cmd('nat20-next', 'Advance the current monster\'s turn', [],
@@ -939,8 +1099,18 @@ function registerCommands() {
                 await postToChat('⚠️ nat20: no active combat — start one with /nat20-fight');
                 return '';
             }
-            const result = await run(() => bridgeFetch(`/v1/combat/${activeCombatId}/advance-monster`, { method: 'POST', body: {} }));
-            if (!result) return '';
+            let result;
+            try {
+                result = await combatFetch('/advance-monster', { method: 'POST', body: {} });
+            } catch (err) {
+                // A 500 here is a foe action the engine can't resolve yet; the
+                // foe may pick another on a retry, or keep failing.
+                const hint = err.status === 500
+                    ? ' — the engine couldn\'t run this foe\'s action: retry /nat20-next, or /nat20-end to close the fight'
+                    : '';
+                await postToChat(`⚠️ nat20: ${err.message}${hint}`);
+                return '';
+            }
             await postCombatResult(result);
             return activeCombatId ?? '';
         });
@@ -951,21 +1121,9 @@ function registerCommands() {
                 await postToChat('⚠️ nat20: no active combat — start one with /nat20-fight');
                 return '';
             }
-            const view = await run(() => bridgeFetch(`/v1/combat/${activeCombatId}`));
+            const view = await run(() => combatFetch(''));
             if (!view) return '';
-
-            const rows = (view.order ?? []).map((o) => {
-                const marker = o.entity_id === currentActorId(view) ? '➤' : '';
-                const conditions = [o.dead ? 'dead' : null, ...(o.conditions ?? [])].filter(Boolean).join(', ');
-                return `| ${marker} | ${o.name} | ${o.hp}/${o.max_hp} | ${conditions} |`;
-            });
-            const table = [
-                '| | Name | HP | Conditions |',
-                '| --- | --- | --- | --- |',
-                ...rows,
-            ].join('\n');
-
-            await postToChat(`📊 **Round ${view.round_number}**\n${table}`);
+            await postToChat(renderStatus(view));
             return String(view.round_number);
         });
 
@@ -975,9 +1133,9 @@ function registerCommands() {
                 await postToChat('⚠️ nat20: no active combat — start one with /nat20-fight');
                 return '';
             }
-            const result = await run(() => bridgeFetch(`/v1/combat/${activeCombatId}/end`, { method: 'POST', body: {} }));
+            const result = await run(() => combatFetch('/end', { method: 'POST', body: {} }));
             if (!result) return '';
-            activeCombatId = null;
+            clearActiveCombat();
 
             const outcome = result.outcome ?? {};
             let msg = `🏁 Combat ended — ${outcome.ended_reason ?? 'unknown'}`;

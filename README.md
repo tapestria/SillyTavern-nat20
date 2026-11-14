@@ -26,10 +26,9 @@ an external sidecar it calls over HTTP.
    uv tool run nat20-bridge
    ```
 
-   `nat20-bridge` isn't published on PyPI yet — until then, `uvx nat20-bridge`
-   and `uv tool run nat20-bridge` won't resolve. Instead, clone
-   [nat20](https://github.com/tapestria/nat20) and run `uv run nat20-bridge`
-   from a checkout.
+   The extension needs `nat20-bridge` 0.7.0 or newer; it refuses to start a
+   fight on an older one. If `uvx` has cached an older release, run
+   `uvx nat20-bridge@latest`.
 
    Useful flags:
 
@@ -65,20 +64,24 @@ help text for e.g. `/nat20-attack` reads elsewhere — always put `weapon=`,
 | `/nat20-equip <name> <item-slug>` | Add an item to a PC's equipment and re-validate, e.g. `/nat20-equip Elara hb-frost-brand`. |
 | `/nat20-rest pc=<name> dice=<n> short` / `/nat20-rest pc=<name> long` | Short or long rest for a roster PC. |
 | `/nat20-fight <monster-slug>... [party=<name,name,...>]` | Start a combat against the given monster slugs (each instantiated separately, so repeat a slug for multiple copies). `party=` defaults to the whole roster; errors if the roster is empty. Stores the returned `combat_id` for subsequent turn commands. |
-| `/nat20-attack weapon=<slug> [pc=<name>] <target>` | Submit an attack intent. `pc=` picks the acting PC explicitly; otherwise defaults to the current actor if it's a roster PC. `<target>` matches an `entity_id` exactly or a combatant name by case-insensitive prefix (errors on no match or ambiguous matches). |
-| `/nat20-cast [pc=<name>] <spell-slug> [<target>]` | Submit a cast-spell intent; target is optional for self-targeted spells. |
+| `/nat20-attack weapon=<slug> [pc=<name>] <target>` / `/nat20-attack action=<id> [pc=<summon>] <target>` | Submit an attack intent. `pc=` picks the actor explicitly: a party PC in the fight, or a creature one of them summoned (Summon Dragon's Draconic Spirit); otherwise the current actor, if it's one of those. A summon attacks with an action from its stat block (`action=rend`). `<target>` matches an `entity_id` exactly, then a whole combatant name, then a name prefix (names case-insensitive) (errors on no match or ambiguous matches). |
+| `/nat20-cast [pc=<name>] [slot=<level>] <spell-slug> [<target>]` | Submit a cast-spell intent; `slot=` upcasts; target is optional for self-targeted spells. |
 | `/nat20-use-item [pc=<name>] <item-slug> [<target>]` | Submit a use-item intent. |
-| `/nat20-feature [pc=<name>] <feature-slug> [<target>]` | Submit a use-feature intent (class features). |
-| `/nat20-next` | Advance the current monster's turn. |
+| `/nat20-feature [pc=<name>] [activity=<id>] <feature-slug> [<target>]` | Submit a use-feature intent (class features); `activity=` picks one option of a multi-option feature such as Channel Divinity. |
+| `/nat20-next` | Advance the current monster's turn. If the engine can't resolve the action the foe picked (a few stat blocks, listed in nat20's backlog), it says so: retry, or `/nat20-end`. |
 | `/nat20-status` | Render a markdown table of the current round's turn order, HP, and conditions, with `➤` marking the current actor. |
 | `/nat20-end` | End the active combat, post the outcome (`ended_reason`, XP, loot if present), and clear the stored combat id. |
 | `/nat20-forge-item name="<name>" base=<slug> [bonus=<n>] [damage=<XdY:type>]` | Forge a magic item via `/v1/forge/item`, e.g. `/nat20-forge-item name="Frost Brand" base=longsword damage=1d6:cold bonus=1`. |
 | `/nat20-homebrew-import <json> [category=<cat>]` | Import homebrew content via `/v1/homebrew/{category}` (default `items`); same endpoint the settings-panel importer uses. |
 
 Every combat-turn command errors with "no active combat" if none is running
-(start one with `/nat20-fight`), and every combat-envelope response
-auto-posts "⚔️ Combat over." and clears the stored combat id once the bridge
-reports `over: true`.
+(start one with `/nat20-fight`). Only `/nat20-end` closes a fight: after each
+turn the extension reads the combat view and, once every foe (or every party
+member) is dead, posts a reminder to `/nat20-end`. Starting a new fight ends
+the previous one, and if the bridge no longer knows the stored fight (it was
+restarted, or the fight expired) the extension clears it. When the engine
+refuses an intent partway through (the bridge's 422), the extension posts the
+turn order so you can see what was already spent.
 
 ## Settings
 
@@ -131,27 +134,21 @@ loose shape — exact wording/rolls will vary.
 8. If it's Elara's turn: `/nat20-attack weapon=quarterstaff goblin` (or
    `/nat20-cast fire-bolt goblin`). If it's the goblin's turn: `/nat20-next`.
    - Expect: narration of the attack/spell/monster-turn's outcome; repeat
-     this step (checking `/nat20-status` as needed) until the bridge reports
-     the fight over.
-   - Expect on the finishing round: `⚔️ Combat over.` posted automatically.
+     this step (checking `/nat20-status` as needed) until one side is down.
+   - Expect on the finishing turn: `⚔️ Every foe is down — /nat20-end to
+     settle the fight.`
 9. `/nat20-end`
    - Expect: `🏁 Combat ended — <victory/defeat_tpk/flee/forced>` with XP/loot
      if the bridge returned any.
 
 ## Known limitations
 
-These are gaps in the current bridge/engine, not the extension — tracked
-upstream in [nat20](https://github.com/tapestria/nat20)'s backlog:
-
-- **Skill/save proficiency for roster PCs isn't applied yet.** Ability
+- **Skill/save proficiency for roster PCs isn't applied yet.** The
+  extension doesn't send a PC's proficiencies to `/v1/check`, so ability
   checks and saving throws resolve as if the character were non-proficient,
   even for skills/saves their class or background grants proficiency in.
-- **Spells can't be upcast.** There's no `slot_level` parameter on
-  `/nat20-cast`, so every cast resolves at the spell's base level regardless
-  of which slot you'd spend.
-- **Multi-option features aren't selectable.** Features with a choice at
-  use-time (e.g. Channel Divinity's multiple options) can't be picked between
-  — only a single default resolution is available.
+- Engine gaps (stat blocks it can't run yet, features that raise) are tracked
+  in [nat20](https://github.com/tapestria/nat20)'s backlog.
 
 ## License
 
