@@ -127,7 +127,7 @@ async function postToChat(text) {
         is_system: false,
         send_date: Date.now(),
         mes: text,
-        extra: { isSmallSys: false, api: 'nat20' },
+        extra: { isSmallSys: false },
     };
 
     // ST's own callers push to `chat` before calling addOneMessage (see
@@ -966,7 +966,7 @@ function registerCommands() {
         });
 
     cmd('nat20-fight',
-        'Start a combat: /nat20-fight goblin-warrior goblin-warrior party=Elara,Brom (party defaults to the whole roster)',
+        'Start a combat: /nat20-fight party=Elara,Brom goblin-warrior goblin-warrior (party defaults to the whole roster)',
         [
             SlashCommandNamedArgument.fromProps({ name: 'party', typeList: ARGUMENT_TYPE.STRING }),
         ],

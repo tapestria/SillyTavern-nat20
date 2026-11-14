@@ -47,9 +47,8 @@ an external sidecar it calls over HTTP.
 ## Command reference
 
 SillyTavern's STscript grammar requires all `name=value` arguments to appear
-before any positional/unnamed arguments on the line, so — despite how the
-help text for e.g. `/nat20-attack` reads elsewhere — always put `weapon=`,
-`pc=`, `dc=`, etc. first and the plain-text argument(s) last.
+before any positional/unnamed arguments on the line, so always put `weapon=`,
+`pc=`, `party=`, etc. first and the plain-text argument(s) last.
 
 | Command | Description |
 | --- | --- |
@@ -63,7 +62,7 @@ help text for e.g. `/nat20-attack` reads elsewhere — always put `weapon=`,
 | `/nat20-pc-remove <name>` | Remove a PC from the roster. |
 | `/nat20-equip <name> <item-slug>` | Add an item to a PC's equipment and re-validate, e.g. `/nat20-equip Elara hb-frost-brand`. |
 | `/nat20-rest pc=<name> dice=<n> short` / `/nat20-rest pc=<name> long` | Short or long rest for a roster PC. |
-| `/nat20-fight <monster-slug>... [party=<name,name,...>]` | Start a combat against the given monster slugs (each instantiated separately, so repeat a slug for multiple copies). `party=` defaults to the whole roster; errors if the roster is empty. Stores the returned `combat_id` for subsequent turn commands. |
+| `/nat20-fight [party=<name,name,...>] <monster-slug>...` | Start a combat against the given monster slugs (each instantiated separately, so repeat a slug for multiple copies). `party=` defaults to the whole roster; errors if the roster is empty. Stores the returned `combat_id` for subsequent turn commands. |
 | `/nat20-attack weapon=<slug> [pc=<name>] <target>` / `/nat20-attack action=<id> [pc=<summon>] <target>` | Submit an attack intent. `pc=` picks the actor explicitly: a party PC in the fight, or a creature one of them summoned (Summon Dragon's Draconic Spirit); otherwise the current actor, if it's one of those. A summon attacks with an action from its stat block (`action=rend`). `<target>` matches an `entity_id` exactly, then a whole combatant name, then a name prefix (names case-insensitive) (errors on no match or ambiguous matches). |
 | `/nat20-cast [pc=<name>] [slot=<level>] <spell-slug> [<target>]` | Submit a cast-spell intent; `slot=` upcasts; target is optional for self-targeted spells. |
 | `/nat20-use-item [pc=<name>] <item-slug> [<target>]` | Submit a use-item intent. |
@@ -125,7 +124,8 @@ loose shape — exact wording/rolls will vary.
 4. `/nat20-forge-item name="Frost Brand" base=quarterstaff damage=1d6:cold bonus=1`
    - Expect: `🔨 <forged-item summary>` in chat (a slug like `hb-frost-brand`).
 5. `/nat20-equip Elara hb-frost-brand`
-   - Expect: `✅ Elara — <updated summary including the new item>`.
+   - Expect: `✅ Elara — <summary>` (the bridge re-validated the build with
+     the new item; the summary line itself doesn't list equipment).
 6. `/nat20-fight goblin-warrior`
    - Expect: the fight's opening narration block posted to chat (round 1,
      initiative order established).
